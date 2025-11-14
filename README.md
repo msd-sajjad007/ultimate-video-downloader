@@ -1,0 +1,38 @@
+# 🎬 Ultimate Video Downloader
+
+A professional-grade video downloader with enterprise browser capture engine. Download videos from 1700+ sites including YouTube, Twitter, Reddit, and more.
+
+![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
+
+## ✨ Features
+
+- 📹 **Download from 1700+ sites** - Powered by yt-dlp
+- 🌐 **Browser Capture Engine** - Intercepts video streams from ANY website
+- 🎯 **Smart Quality Selection** - Choose from 4K, 1080p, 720p, 480p, audio-only
+- 📊 **Batch Downloads** - Queue multiple videos
+- 🗃️ **Download History** - SQLite database tracking
+- 🎨 **Modern GUI** - Built with CustomTkinter
+- ⚡ **Fast & Reliable** - Multi-threaded downloads
+- 🛑 **Cancel Support** - Stop downloads anytime
+
+## 🖼️ Screenshots
+
+![Main Interface](screenshots/main.png)
+*Main download interface*
+
+![Browser Capture](screenshots/capture.png)
+*Browser capture in action*
+
+## 📋 Requirements
+
+- Python 3.8 or higher
+- Windows 10/11 (for compiled .exe)
+- Internet connection
+
+## 🚀 Installation
+
+### Option 1: Run from Source (Recommended for Developers)
+
+1. **Clone the repository:**

@@ -1,0 +1,31 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite3
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# User data
+.ultimate_downloader_*
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Playwright browsers
+.cache/ms-playwright/
