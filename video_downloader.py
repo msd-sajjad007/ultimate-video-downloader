@@ -29,6 +29,64 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODERN THEME CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class Theme:
+    """Ultra-modern color scheme and styling"""
+    
+    # Background colors - Deep space theme
+    BG_PRIMARY = "#0a0e27"       # Deep dark blue
+    BG_SECONDARY = "#151a2e"      # Card background
+    BG_TERTIARY = "#1e2640"       # Elevated cards
+    BG_INPUT = "#252b4a"          # Input fields
+    
+    # Accent colors
+    ACCENT_PRIMARY = "#00d4ff"    # Bright cyan
+    ACCENT_SECONDARY = "#667eea"  # Purple
+    ACCENT_TERTIARY = "#f093fb"   # Pink
+    
+    # Status colors
+    SUCCESS = "#10b981"           # Green
+    ERROR = "#ef4444"             # Red  
+    WARNING = "#f59e0b"           # Orange
+    INFO = "#3b82f6"              # Blue
+    
+    # Text colors
+    TEXT_PRIMARY = "#ffffff"
+    TEXT_SECONDARY = "#94a3b8"
+    TEXT_MUTED = "#64748b"
+    
+    # UI elements
+    BORDER = "#334155"
+    HOVER = "#00b8e6"
+    SHADOW = "#000000"
+    
+    # Fonts
+    FONT_TITLE = ("Segoe UI", 28, "bold")
+    FONT_SUBTITLE = ("Segoe UI", 16, "bold")
+    FONT_BODY = ("Segoe UI", 12)
+    FONT_SMALL = ("Segoe UI", 10)
+    FONT_BUTTON = ("Segoe UI", 13, "bold")
+    
+    # Spacing
+    PADDING_XLARGE = 30
+    PADDING_LARGE = 20
+    PADDING_MEDIUM = 15
+    PADDING_SMALL = 10
+    PADDING_TINY = 5
+    
+    # Border radius
+    RADIUS_LARGE = 20
+    RADIUS_MEDIUM = 15
+    RADIUS_SMALL = 10
+    
+    # Sizes
+    BUTTON_HEIGHT = 45
+    INPUT_HEIGHT = 45
+    HEADER_HEIGHT = 80
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BROWSER CAPTURE ENGINE - ENTERPRISE-GRADE (VIDEO-ONLY)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -711,6 +769,40 @@ class DownloadManager:
         if self.log_callback:
             self.log_callback(msg)
     
+    def _format_for_quality(self, quality: str) -> str:
+        """
+        Map GUI quality selection to yt-dlp format string.
+        Ensures exact quality matching for user selection.
+        """
+        if not quality or quality == "best":
+            # Best available video + best available audio
+            return "bv*+ba/best"
+        
+        if quality == "audio":
+            # Best audio only
+            return "bestaudio/best"
+        
+        # Handle specific quality selection (e.g., "720p", "1080p", "144p")
+        if quality.endswith("p"):
+            try:
+                height = int(quality[:-1])  # Remove 'p' and convert to int
+                
+                # Format string breakdown:
+                # 1. Try exact height with best audio
+                # 2. Try height within ±10% tolerance with best audio
+                # 3. Fallback to best video near that height
+                # 4. Final fallback to best available
+                
+                # For better quality matching, especially for lower resolutions like 144p
+                return f"bv*[height={height}]+ba/bv*[height<={int(height*1.1)}][height>={int(height*0.9)}]+ba/b[height<={int(height*1.1)}]/best"
+                
+            except (ValueError, IndexError):
+                self.log(f"Invalid quality format: {quality}, using best")
+                return "bv*+ba/best"
+        
+        # Default fallback
+        return "bv*+ba/best"
+
     # ✅ Allow UI to cancel an in-flight download
     def cancel(self):
         """Cancel the current download."""
@@ -1136,15 +1228,8 @@ class DownloadManager:
         target_ext = ".mp3" if is_audio else ".mp4"
         outtmpl = os.path.join(output_path, f"{chosen_title}{target_ext}")
 
-        # Get format string, but modify it to prefer pre-merged formats
-        fmt = self._get_format_string(quality)
-        
-        # For YouTube, prefer formats that don't need merging
-        if not is_audio:
-            # Try to get single-file format first, fallback to best with merge
-            fmt = f"bv*[height<={quality.replace('p', '')}]+ba/b[height<={quality.replace('p', '')}]/bv*+ba/b"
-            if quality == "best":
-                fmt = "bv*+ba/b"  # Best video + audio, or single best file
+        # Use the new format mapper that respects GUI quality selection
+        fmt = self._format_for_quality(quality)
 
         opts = {
             "logger": _YDLLogger(self.log),
@@ -1293,91 +1378,1351 @@ def finalize_media(self, input_path: str, output_dir: str, chosen_title: str, is
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION - WITH STATE SAVING FIX
+# MODERN GUI CLASS - ULTRA-MODERN EDITION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class UltimateDownloaderV9(ctk.CTk):
-    """v9.0 Final - State Saving Added"""
+class UltimateDownloaderModern(ctk.CTk):
+    """Ultra-modern video downloader interface"""
     
     def __init__(self):
         super().__init__()
         
-        self.title("🎥 Ultimate Video Downloader v9.0 Final")
-        self.geometry("1600x950")
-        self.minsize(1400, 900)
+        # Window configuration
+        self.title("🎬 Ultimate Video Downloader Pro")
+        self.geometry("1400x900")
+        self.minsize(1300, 850)
+        self.configure(fg_color=Theme.BG_PRIMARY)
         
+        # State management
+        self.is_downloading = False
+        self.download_path = str(Path.home() / "Downloads")
+        self._log_buffer = []  # Buffer for early log messages
+        
+        # Managers created later
         self.db = DatabaseManager()
+        self.capture_engine = None
+        
+        # ✅ FIRST: build the UI (this defines update_progress, creates widgets, etc.)
+        self.setup_ui()
+        
+        # ✅ THEN: create DownloadManager
         self.download_manager = DownloadManager(
             progress_callback=self.update_progress,
             log_callback=self.log
         )
         
-        self.download_path = str(Path.home() / "Downloads")
-        self.is_downloading = False
-        self.is_batch_downloading = False
-        self.available_qualities = []
-        self.video_info = None
+        # Load stats
+        self.load_stats()
+     
+    def setup_ui(self):
+        """Create the ultra-modern interface"""
         
-        # ✅ NEW - State saving variables
-        self.saved_url = ""
-        self.saved_batch_urls = ""
-        self.saved_detected_info = False
+        # Main container
+        self.main_container = ctk.CTkFrame(
+            self,
+            fg_color="transparent"
+        )
+        self.main_container.pack(fill="both", expand=True, padx=0, pady=0)
         
-        self.create_interface()
+        # Header
+        self.create_header()
+        
+        # Content area (includes tabs AND log)
+        self.create_content()
+
     
-    def create_interface(self):
-        """Create interface"""
+    def create_header(self):
+        """Create stunning gradient header"""
         
-        # Sidebar
-        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
+        # Header frame with gradient effect
+        header = ctk.CTkFrame(
+            self.main_container,
+            height=100,
+            fg_color=Theme.BG_SECONDARY,
+            corner_radius=0
+        )
+        header.pack(fill="x", padx=0, pady=0)
+        header.pack_propagate(False)
+        
+        # Left side - Logo and title
+        left_section = ctk.CTkFrame(header, fg_color="transparent")
+        left_section.pack(side="left", fill="y", padx=30)
+        
+        # Title with gradient effect (simulated with colors)
+        title = ctk.CTkLabel(
+            left_section,
+            text="🎬 Ultimate Video Downloader",
+            font=Theme.FONT_TITLE,
+            text_color=Theme.ACCENT_PRIMARY
+        )
+        title.pack(side="left", pady=20)
+        
+        # Version badge
+        version = ctk.CTkLabel(
+            left_section,
+            text="v2.0 PRO",
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_SECONDARY,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=10,
+            padx=15,
+            pady=5
+        )
+        version.pack(side="left", padx=15, pady=20)
+        
+        # Right side - Quick actions
+        right_section = ctk.CTkFrame(header, fg_color="transparent")
+        right_section.pack(side="right", fill="y", padx=30)
+        
+        # Settings button
+        settings_btn = ctk.CTkButton(
+            right_section,
+            text="⚙️ Settings",
+            width=120,
+            height=40,
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.open_settings
+        )
+        settings_btn.pack(side="right", padx=5, pady=20)
+        
+        # Help button
+        help_btn = ctk.CTkButton(
+            right_section,
+            text="❓ Help",
+            width=120,
+            height=40,
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.show_help
+        )
+        help_btn.pack(side="right", padx=5, pady=20)
+
+
+    def create_content(self):
+        """Create main content area with tabs and shared activity log - WITH SCROLLING"""
+        
+        # Main content frame (container for everything)
+        content_frame = ctk.CTkFrame(
+            self.main_container,
+            fg_color="transparent"
+        )
+        content_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # ✅ CREATE SCROLLABLE FRAME
+        scrollable_frame = ctk.CTkScrollableFrame(
+            content_frame,
+            fg_color="transparent",
+            scrollbar_button_color=Theme.BG_TERTIARY,
+            scrollbar_button_hover_color=Theme.HOVER
+        )
+        scrollable_frame.pack(fill="both", expand=True)
+        
+        # Tabs container inside scrollable frame
+        tabs_container = ctk.CTkFrame(
+            scrollable_frame,
+            fg_color="transparent"
+        )
+        tabs_container.pack(fill="both", expand=False, pady=(0, 10))
+        
+        # Tabview with fixed height
+        self.tabview = ctk.CTkTabview(
+            tabs_container,
+            fg_color=Theme.BG_SECONDARY,
+            segmented_button_fg_color=Theme.BG_TERTIARY,
+            segmented_button_selected_color=Theme.ACCENT_PRIMARY,
+            segmented_button_selected_hover_color=Theme.HOVER,
+            segmented_button_unselected_color=Theme.BG_TERTIARY,
+            segmented_button_unselected_hover_color=Theme.BG_INPUT,
+            corner_radius=Theme.RADIUS_LARGE,
+            border_width=0,
+            height=500  # Fixed height for tabs
+        )
+        self.tabview.pack(fill="both", expand=True)
+        
+        # Add tabs
+        self.tab_download = self.tabview.add("📥 Download")
+        self.tab_batch = self.tabview.add("📋 Batch")
+        self.tab_history = self.tabview.add("📊 History")
+        
+        # Setup tabs
+        self.setup_download_tab()
+        self.setup_batch_tab()
+        self.setup_history_tab()
+        
+        # Activity log below tabs (also inside scrollable frame)
+        self.create_shared_log(scrollable_frame)
+
+    def create_shared_log(self, parent):
+        """Create shared activity log visible on ALL tabs - SCROLLABLE VERSION"""
+        
+        # Activity log container with increased height
+        log_container = ctk.CTkFrame(
+            parent,
+            fg_color=Theme.BG_SECONDARY,
+            corner_radius=Theme.RADIUS_MEDIUM,
+            height=200  # Increased to 200px
+        )
+        log_container.pack(fill="x", pady=(10, 0))
+        log_container.pack_propagate(False)
+        
+        # Header (compact)
+        log_header = ctk.CTkFrame(log_container, fg_color="transparent")
+        log_header.pack(fill="x", padx=20, pady=(10, 5))
+        
+        ctk.CTkLabel(
+            log_header,
+            text="📝 Activity Log",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(side="left")
+        
+        ctk.CTkButton(
+            log_header,
+            text="🗑️ Clear",
+            width=80,
+            height=28,
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            corner_radius=6,
+            font=Theme.FONT_SMALL,
+            command=self.clear_log
+        ).pack(side="right")
+        
+        # Log textbox (scrollable built-in)
+        self.log_textbox = ctk.CTkTextbox(
+            log_container,
+            fg_color=Theme.BG_INPUT,
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word"
+        )
+        self.log_textbox.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        
+        # Enable text widget
+        self.log_textbox.configure(state="normal")
+        
+        # Flush buffer
+        if hasattr(self, '_log_buffer'):
+            for msg in self._log_buffer:
+                try:
+                    self.log_textbox.insert("end", msg + "\n")
+                except:
+                    pass
+            self._log_buffer.clear()
+        
+        # Initial message
+        self.log("✅ Ready to download!")
+        self.log_textbox.see("end")
+
+
+    def setup_download_tab(self):
+        """Create the main download interface"""
+        
+        # Main card
+        card = ctk.CTkFrame(
+            self.tab_download,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # URL Input Section
+        url_section = ctk.CTkFrame(card, fg_color="transparent")
+        url_section.pack(fill="x", padx=30, pady=(30, 20))
+        
+        url_label = ctk.CTkLabel(
+            url_section,
+            text="📎 Video URL",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        url_label.pack(anchor="w", pady=(0, 10))
+        
+        # URL input with paste button
+        url_input_frame = ctk.CTkFrame(url_section, fg_color="transparent")
+        url_input_frame.pack(fill="x")
+        
+        self.url_entry = ctk.CTkEntry(
+            url_input_frame,
+            height=Theme.INPUT_HEIGHT,
+            placeholder_text="https://www.youtube.com/watch?v=...",
+            fg_color=Theme.BG_INPUT,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_PRIMARY,
+            placeholder_text_color=Theme.TEXT_MUTED
+        )
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        paste_btn = ctk.CTkButton(
+            url_input_frame,
+            text="📋 Paste",
+            width=100,
+            height=Theme.INPUT_HEIGHT,
+            fg_color=Theme.BG_INPUT,
+            hover_color=Theme.BG_SECONDARY,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.paste_url
+        )
+        paste_btn.pack(side="right")
+        
+        # Quality Selection
+        quality_section = ctk.CTkFrame(card, fg_color="transparent")
+        quality_section.pack(fill="x", padx=30, pady=20)
+        
+        quality_label = ctk.CTkLabel(
+            quality_section,
+            text="🎯 Quality",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        quality_label.pack(anchor="w", pady=(0, 10))
+        
+        # Quality buttons in a row - MUST be instance variable for analyze to update
+        self.quality_buttons_frame = ctk.CTkFrame(quality_section, fg_color="transparent")
+        self.quality_buttons_frame.pack(fill="x")
+        
+        self.quality_var = tk.StringVar(value="best")
+        
+        qualities = [
+            ("🏆 Best", "best"),
+            ("📺 1080p", "1080p"),
+            ("🎬 720p", "720p"),
+            ("📱 480p", "480p"),
+            ("🎵 Audio", "audio")
+        ]
+        
+        for i, (label, value) in enumerate(qualities):
+            btn = ctk.CTkRadioButton(
+                self.quality_buttons_frame,
+                text=label,
+                variable=self.quality_var,
+                value=value,
+                font=Theme.FONT_BODY,
+                fg_color=Theme.ACCENT_PRIMARY,
+                hover_color=Theme.HOVER,
+                border_color=Theme.BORDER,
+                text_color=Theme.TEXT_PRIMARY
+            )
+            btn.pack(side="left", padx=10, pady=5)
+        
+        # Output Path
+        path_section = ctk.CTkFrame(card, fg_color="transparent")
+        path_section.pack(fill="x", padx=30, pady=20)
+        
+        path_label = ctk.CTkLabel(
+            path_section,
+            text="📁 Save Location",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        path_label.pack(anchor="w", pady=(0, 10))
+        
+        path_input_frame = ctk.CTkFrame(path_section, fg_color="transparent")
+        path_input_frame.pack(fill="x")
+        
+        self.path_entry = ctk.CTkEntry(
+            path_input_frame,
+            height=Theme.INPUT_HEIGHT,
+            fg_color=Theme.BG_INPUT,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        self.path_entry.insert(0, str(Path.home() / "Downloads"))
+        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        browse_btn = ctk.CTkButton(
+            path_input_frame,
+            text="🔍 Browse",
+            width=120,
+            height=Theme.INPUT_HEIGHT,
+            fg_color=Theme.BG_INPUT,
+            hover_color=Theme.BG_SECONDARY,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.browse_folder
+        )
+        browse_btn.pack(side="right")
+        
+        # Progress Section
+        progress_section = ctk.CTkFrame(card, fg_color=Theme.BG_INPUT, corner_radius=Theme.RADIUS_MEDIUM)
+        progress_section.pack(fill="x", padx=30, pady=20)
+        
+        # Progress bar
+        self.progress_bar = ctk.CTkProgressBar(
+            progress_section,
+            height=20,
+            progress_color=Theme.ACCENT_PRIMARY,
+            fg_color=Theme.BG_SECONDARY,
+            corner_radius=10
+        )
+        self.progress_bar.pack(fill="x", padx=20, pady=(20, 10))
+        self.progress_bar.set(0)
+        
+        # Status text
+        self.status_label = ctk.CTkLabel(
+            progress_section,
+            text="Ready to download",
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.status_label.pack(pady=(0, 10))
+        
+        # Speed and ETA
+        stats_frame = ctk.CTkFrame(progress_section, fg_color="transparent")
+        stats_frame.pack(fill="x", padx=20, pady=(0, 20))
+        
+        self.speed_label = ctk.CTkLabel(
+            stats_frame,
+            text="Speed: 0 MB/s",
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_MUTED
+        )
+        self.speed_label.pack(side="left", padx=10)
+        
+        self.eta_label = ctk.CTkLabel(
+            stats_frame,
+            text="ETA: --:--",
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_MUTED
+        )
+        self.eta_label.pack(side="right", padx=10)
+        
+        # Action Buttons
+        button_section = ctk.CTkFrame(card, fg_color="transparent")
+        button_section.pack(fill="x", padx=30, pady=(0, 30))
+        
+        # Download button (main CTA)
+        self.download_btn = ctk.CTkButton(
+            button_section,
+            text="⬇️ Download Video",
+            height=55,
+            fg_color=Theme.ACCENT_PRIMARY,
+            hover_color=Theme.HOVER,
+            border_width=0,
+            corner_radius=Theme.RADIUS_MEDIUM,
+            font=Theme.FONT_BUTTON,
+            text_color=Theme.TEXT_PRIMARY,
+            command=self.start_download
+        )
+        self.download_btn.pack(fill="x", pady=5)
+        
+        # Secondary buttons row
+        secondary_buttons = ctk.CTkFrame(button_section, fg_color="transparent")
+        secondary_buttons.pack(fill="x", pady=5)
+        
+        self.cancel_btn = ctk.CTkButton(
+            secondary_buttons,
+            text="⏹️ Cancel",
+            height=45,
+            fg_color=Theme.ERROR,
+            hover_color="#dc2626",
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            state="disabled",
+            command=self.cancel_download
+        )
+        self.cancel_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        analyze_btn = ctk.CTkButton(
+            secondary_buttons,
+            text="🔍 Analyze",
+            height=45,
+            fg_color=Theme.INFO,
+            hover_color="#2563eb",
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.analyze_url
+        )
+        analyze_btn.pack(side="left", fill="x", expand=True, padx=5)
+        
+        capture_btn = ctk.CTkButton(
+            secondary_buttons,
+            text="🌐 Browser Capture",
+            height=45,
+            fg_color=Theme.ACCENT_SECONDARY,
+            hover_color="#5568d3",
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            command=self.browser_capture
+        )
+        capture_btn.pack(side="left", fill="x", expand=True, padx=(5, 0))
+    
+    def setup_batch_tab(self):
+        """Create batch download interface"""
+        
+        card = ctk.CTkFrame(
+            self.tab_batch,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Title
+        title = ctk.CTkLabel(
+            card,
+            text="📋 Batch Download",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        title.pack(pady=20)
+        
+        # URL list
+        self.batch_textbox = ctk.CTkTextbox(
+            card,
+            height=300,
+            fg_color=Theme.BG_INPUT,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        self.batch_textbox.pack(fill="both", expand=True, padx=30, pady=20)
+        
+        # Batch controls
+        batch_btn = ctk.CTkButton(
+            card,
+            text="⬇️ Start Batch Download",
+            height=50,
+            fg_color=Theme.ACCENT_PRIMARY,
+            hover_color=Theme.HOVER,
+            corner_radius=Theme.RADIUS_MEDIUM,
+            font=Theme.FONT_BUTTON,
+            command=self.start_batch_download
+        )
+        batch_btn.pack(fill="x", padx=30, pady=(0, 30))
+    
+    def setup_history_tab(self):
+        """Create download history interface"""
+        
+        card = ctk.CTkFrame(
+            self.tab_history,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Stats cards at top
+        stats_container = ctk.CTkFrame(card, fg_color="transparent")
+        stats_container.pack(fill="x", padx=20, pady=20)
+        
+        # Total downloads
+        self.total_downloads_card = self.create_stat_card(
+            stats_container,
+            "📊 Total Downloads",
+            "0",
+            Theme.SUCCESS
+        )
+        self.total_downloads_card.pack(side="left", fill="x", expand=True, padx=5)
+        self.total_downloads_label = self.total_downloads_card.value_label
+        
+        # Total size
+        self.total_size_card = self.create_stat_card(
+            stats_container,
+            "💾 Total Size",
+            "0 GB",
+            Theme.INFO
+        )
+        self.total_size_card.pack(side="left", fill="x", expand=True, padx=5)
+        self.total_size_label = self.total_size_card.value_label
+        
+        # Avg time
+        self.avg_time_card = self.create_stat_card(
+            stats_container,
+            "⏱️ Avg Time",
+            "0s",
+            Theme.WARNING
+        )
+        self.avg_time_card.pack(side="left", fill="x", expand=True, padx=5)
+        self.avg_time_label = self.avg_time_card.value_label
+        
+        # History list
+        self.history_textbox = ctk.CTkTextbox(
+            card,
+            fg_color=Theme.BG_INPUT,
+            border_width=2,
+            border_color=Theme.BORDER,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        self.history_textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+    
+    def create_stat_card(self, parent, title, value, color):
+        """Create a stat card widget"""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=Theme.BG_INPUT,
+            corner_radius=Theme.RADIUS_SMALL
+        )
+        
+        title_label = ctk.CTkLabel(
+            card,
+            text=title,
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_SECONDARY
+        )
+        title_label.pack(pady=(15, 5))
+        
+        value_label = ctk.CTkLabel(
+            card,
+            text=value,
+            font=("Segoe UI", 20, "bold"),
+            text_color=color
+        )
+        value_label.pack(pady=(0, 15))
+        
+        # Store reference to card for packing
+        card.value_label = value_label
+        return card
+    
+    def create_log_section(self, parent):
+        """Create shared activity log visible on ALL tabs"""
+        
+        # Log container with fixed height
+        log_container = ctk.CTkFrame(
+            parent,
+            fg_color=Theme.BG_SECONDARY,
+            corner_radius=Theme.RADIUS_MEDIUM,
+            height=140
+        )
+        log_container.pack(fill="x", pady=(10, 0))
+        log_container.pack_propagate(False)
+        
+        # Header with title and clear button
+        log_header = ctk.CTkFrame(log_container, fg_color="transparent", height=40)
+        log_header.pack(fill="x", padx=20, pady=(12, 0))
+        log_header.pack_propagate(False)
+        
+        # Title
+        log_title = ctk.CTkLabel(
+            log_header,
+            text="📝 Activity Log",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        log_title.pack(side="left", anchor="w")
+        
+        # Clear button
+        clear_btn = ctk.CTkButton(
+            log_header,
+            text="🗑️ Clear",
+            width=90,
+            height=30,
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            corner_radius=8,
+            font=Theme.FONT_SMALL,
+            command=self.clear_log
+        )
+        clear_btn.pack(side="right")
+        
+        # The actual log textbox (shared across all tabs)
+        self.log_textbox = ctk.CTkTextbox(
+            log_container,
+            fg_color=Theme.BG_INPUT,
+            border_width=0,
+            corner_radius=Theme.RADIUS_SMALL,
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_SECONDARY,
+            wrap="word"
+        )
+        self.log_textbox.pack(fill="both", expand=True, padx=20, pady=(8, 12))
+        
+        # Flush buffered logs
+        if hasattr(self, '_log_buffer'):
+            for msg in self._log_buffer:
+                try:
+                    self.log_textbox.insert("end", msg)
+                except:
+                    pass
+            self._log_buffer.clear()
+        
+        # Initial welcome message
+        self.log("✅ Application ready! Paste a URL to start.")
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # UTILITY METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def log(self, message):
+        """Thread-safe activity logging"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}\n"
+        
+        if hasattr(self, 'log_textbox'):
+            try:
+                self.log_textbox.configure(state="normal")  # Enable editing
+                self.log_textbox.insert("end", log_entry)
+                self.log_textbox.see("end")  # Auto-scroll to bottom
+            except:
+                # Buffer if textbox not ready
+                if not hasattr(self, '_log_buffer'):
+                    self._log_buffer = []
+                self._log_buffer.append(log_entry)
+        else:
+            # Buffer logs before textbox is created
+            if not hasattr(self, '_log_buffer'):
+                self._log_buffer = []
+            self._log_buffer.append(log_entry)
+
+
+    def clear_log(self):
+        """Clear the activity log"""
+        if hasattr(self, 'log_textbox'):
+            try:
+                self.log_textbox.delete("1.0", "end")
+                self.log("📝 Activity log cleared")
+            except:
+                pass
+    
+    def paste_url(self):
+        """Paste URL from clipboard"""
+        try:
+            url = pyperclip.paste()
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, url)
+            self.log("📋 URL pasted from clipboard")
+        except Exception as e:
+            self.log(f"❌ Failed to paste: {e}")
+    
+    def browse_folder(self):
+        """Browse for output folder"""
+        folder = filedialog.askdirectory(initialdir=self.download_path)
+        if folder:
+            self.download_path = folder
+            self.path_entry.delete(0, "end")
+            self.path_entry.insert(0, folder)
+            self.log(f"📁 Output folder: {folder}")
+    
+    def load_stats(self):
+        """Load download statistics"""
+        try:
+            stats = self.db.get_statistics()
+            
+            # Update stat cards
+            total = stats.get('total_downloads', 0)
+            size_gb = stats.get('total_size', 0) / (1024**3) if stats.get('total_size') else 0
+            
+            # Calculate average time from completion_time
+            try:
+                self.db.cursor.execute('SELECT AVG(completion_time) FROM downloads WHERE status = "completed" AND completion_time > 0')
+                avg_time_result = self.db.cursor.fetchone()
+                avg_time = int(avg_time_result[0]) if avg_time_result and avg_time_result[0] else 0
+            except:
+                avg_time = 0
+            
+            self.total_downloads_label.configure(text=str(total))
+            self.total_size_label.configure(text=f"{size_gb:.2f} GB")
+            self.avg_time_label.configure(text=f"{avg_time}s")
+            
+            # Load history
+            self.load_history()
+            
+        except Exception as e:
+            self.log(f"⚠️ Failed to load stats: {e}")
+    
+    def load_history(self):
+        """Load download history"""
+        try:
+            self.history_textbox.delete("1.0", "end")
+            
+            downloads = self.db.get_download_history(50)
+            
+            if not downloads:
+                self.history_textbox.insert("end", "No download history yet\n")
+                return
+            
+            for dl in downloads:
+                # Handle both tuple and dict formats
+                if isinstance(dl, tuple):
+                    id_, url, title, site, quality, filepath, filesize, duration, date, comp_time, speed, status = dl
+                else:
+                    id_ = dl.get('id', 0)
+                    url = dl.get('url', '')
+                    title = dl.get('title', 'Unknown')
+                    site = dl.get('site', '')
+                    quality = dl.get('quality', '')
+                    filepath = dl.get('file_path', '')
+                    filesize = dl.get('file_size', 0)
+                    duration = dl.get('duration', 0)
+                    date = dl.get('download_date', '')
+                    comp_time = dl.get('completion_time', 0)
+                    speed = dl.get('average_speed', 0)
+                    status = dl.get('status', 'completed')
+                
+                size_mb = filesize / (1024*1024) if filesize else 0
+                date_str = str(date).split()[0] if date else "Unknown"
+                
+                entry = f"📥 {title[:50] if title else 'Unknown'}\n"
+                entry += f"   🔗 {url[:60]}...\n"
+                entry += f"   📊 {quality} | 💾 {size_mb:.1f}MB | 📅 {date_str}\n\n"
+                
+                self.history_textbox.insert("end", entry)
+        
+        except Exception as e:
+            self.log(f"⚠️ Failed to load history: {e}")
+    
+    def update_progress(self, data):
+        """Update progress bar and stats"""
+        try:
+            percent = data.get('percent', 0)
+            speed = data.get('speed', 0)
+            eta = data.get('eta', 0)
+            
+            # Update progress bar
+            self.progress_bar.set(percent / 100)
+            
+            # Update status
+            self.status_label.configure(
+                text=f"Downloading... {percent:.1f}%",
+                text_color=Theme.ACCENT_PRIMARY
+            )
+            
+            # Update speed
+            if speed:
+                speed_mb = speed / (1024 * 1024)
+                self.speed_label.configure(text=f"Speed: {speed_mb:.2f} MB/s")
+            
+            # Update ETA
+            if eta:
+                minutes, seconds = divmod(int(eta), 60)
+                self.eta_label.configure(text=f"ETA: {minutes:02d}:{seconds:02d}")
+        
+        except Exception as e:
+            print(f"Progress update error: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DOWNLOAD METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def start_download(self):
+        """Start single download"""
+        if self.is_downloading:
+            messagebox.showwarning("Warning", "Download already in progress!")
+            return
+        
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Warning", "Please enter a video URL!")
+            return
+        
+        quality = self.quality_var.get()
+        output_path = self.path_entry.get().strip()
+        
+        if not output_path:
+            output_path = str(Path.home() / "Downloads")
+        
+        # Reset UI
+        self.is_downloading = True
+        self.download_btn.configure(state="disabled", fg_color=Theme.TEXT_MUTED)
+        self.cancel_btn.configure(state="normal")
+        self.progress_bar.set(0)
+        self.status_label.configure(
+            text="Starting download...",
+            text_color=Theme.INFO
+        )
+        
+        # Reset download manager
+        self.download_manager.is_cancelled = False
+        
+        # Start download thread
+        threading.Thread(
+            target=self.download_thread,
+            args=(url, quality, output_path),
+            daemon=True
+        ).start()
+        
+        self.log(f"⬇️ Starting download: {url[:60]}...")
+    
+    def download_thread(self, url, quality, output_path):
+        """Background download thread"""
+        try:
+            result = self.download_manager.download(url, quality, output_path)
+            
+            if result['success']:
+                info = result.get('info', {})
+                title = info.get('title', 'Video')
+                site = info.get('extractor', 'Unknown')
+                filesize = info.get('filesize', 0) or info.get('file_size', 0)
+                duration = info.get('duration', 0)
+                comp_time = result.get('completion_time', 0)
+                
+                # Get file path from result
+                filepath = result.get('filepath', output_path)
+                if isinstance(info, dict) and 'requested_downloads' in info:
+                    if info['requested_downloads']:
+                        filepath = info['requested_downloads'][0].get('filepath', output_path)
+                
+                # Save to database
+                self.db.add_download(
+                    url=url,
+                    title=title,
+                    site=site,
+                    quality=quality,
+                    file_path=filepath,
+                    file_size=filesize,
+                    duration=duration,
+                    completion_time=comp_time,
+                    avg_speed=0
+                )
+                
+                # Update UI
+                self.after(0, lambda: self.download_complete(True, title))
+                self.after(0, self.load_stats)
+            
+            else:
+                error = result.get('error', 'Unknown error')
+                self.after(0, lambda: self.download_complete(False, error))
+        
+        except Exception as e:
+            self.after(0, lambda: self.download_complete(False, str(e)))
+    
+    def download_complete(self, success, message):
+        """Handle download completion"""
+        self.is_downloading = False
+        self.download_btn.configure(state="normal", fg_color=Theme.ACCENT_PRIMARY)
+        self.cancel_btn.configure(state="disabled")
+        
+        if success:
+            self.status_label.configure(
+                text=f"✅ Downloaded: {message[:40]}",
+                text_color=Theme.SUCCESS
+            )
+            self.progress_bar.set(1.0)
+            self.log(f"✅ Download complete: {message}")
+            messagebox.showinfo("Success", f"Downloaded successfully!\n{message}")
+        else:
+            self.status_label.configure(
+                text=f"❌ Failed: {message[:40]}",
+                text_color=Theme.ERROR
+            )
+            self.progress_bar.set(0)
+            self.log(f"❌ Download failed: {message}")
+            
+            if "cancelled" not in message.lower():
+                messagebox.showerror("Error", f"Download failed:\n{message[:200]}")
+    
+    def cancel_download(self):
+        """Cancel current download"""
+        if self.is_downloading:
+            self.download_manager.cancel()
+            self.status_label.configure(
+                text="⏹️ Cancelling...",
+                text_color=Theme.WARNING
+            )
+            self.log("⏹️ Cancelling download...")
+    
+    def analyze_url(self):
+        """Analyze video and update quality buttons"""
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Warning", "Please enter a URL!")
+            return
+        
+        self.log(f"🔍 Analyzing: {url[:60]}...")
+        
+        def worker():
+            try:
+                opts = {'quiet': True, 'no_warnings': True}
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                
+                # Extract heights
+                heights = sorted({
+                    f.get('height') for f in info.get('formats', [])
+                    if f and f.get('vcodec') != 'none' and isinstance(f.get('height'), int)
+                }, reverse=True)
+                
+                # Filter to common resolutions for cleaner UI
+                common = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+                heights = [h for h in common if h in heights] or heights[:8]
+                
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration') or 0
+                m, s = divmod(int(duration), 60)
+                
+                # ✅ UPDATE GUI ON MAIN THREAD
+                self.after(0, lambda: self.create_dynamic_quality_buttons(heights))
+                self.after(0, lambda: self.log(f"✅ {title[:60]}"))
+                self.after(0, lambda: self.log(f"✅ Detected qualities: {', '.join([f'{h}p' for h in heights[:8]])}"))
+                
+            except Exception as e:
+                msg = str(e)[:200]
+                self.after(0, lambda: self.log(f"❌ Analysis failed: {msg}"))
+        
+        threading.Thread(target=worker, daemon=True).start()
+
+    def create_dynamic_quality_buttons(self, heights):
+        """Rebuild quality buttons with detected formats"""
+        
+        if not hasattr(self, 'quality_buttons_frame'):
+            self.log("Quality buttons frame not found")
+            return
+        
+        # Clear existing buttons
+        for widget in self.quality_buttons_frame.winfo_children():
+            widget.destroy()
+        
+        if not hasattr(self, 'quality_var'):
+            self.quality_var = tk.StringVar(value="best")
+        
+        # Best option
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame,
+            text="Best",
+            variable=self.quality_var,
+            value="best",
+            font=Theme.FONT_BODY,
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(side="left", padx=10, pady=5)
+        
+        # Common resolutions - INCLUDE 144p
+        common = [2160, 1440, 1080, 720, 480, 360, 240, 144]
+        heights = [h for h in common if h in heights] or heights[:10]  # Show up to 10 qualities
+        
+        # Add detected qualities
+        for h in heights:
+            ctk.CTkRadioButton(
+                self.quality_buttons_frame,
+                text=f"{h}p",
+                variable=self.quality_var,
+                value=f"{h}p",
+                font=Theme.FONT_BODY,
+                fg_color=Theme.ACCENT_PRIMARY,
+                text_color=Theme.TEXT_PRIMARY,
+                hover_color=Theme.HOVER
+            ).pack(side="left", padx=10, pady=5)
+        
+        # Audio option
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame,
+            text="Audio",
+            variable=self.quality_var,
+            value="audio",
+            font=Theme.FONT_BODY,
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(side="left", padx=10, pady=5)
+        
+        self.log(f"Quality buttons updated: {len(heights)} formats detected")
+
+    def browser_capture(self):
+        """Start browser capture"""
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showwarning("Warning", "Please enter a URL!")
+            return
+        
+        self.log("🌐 Starting browser capture...")
+        
+        def on_video_found(video_url, title, page_url):
+            """Callback when video is captured"""
+            self.after(0, lambda: self.url_entry.delete(0, "end"))
+            self.after(0, lambda: self.url_entry.insert(0, video_url))
+            self.after(0, lambda: self.log(f"🎬 Captured: {video_url[:60]}..."))
+            self.after(0, lambda: messagebox.showinfo("Captured!", f"Video stream captured!\n\n{title}"))
+        
+        def capture_thread():
+            try:
+                engine = BrowserCaptureEngine(
+                    log_fn=lambda msg: self.after(0, lambda: self.log(msg)),
+                    on_found=on_video_found
+                )
+                self.capture_engine = engine
+                engine.start(url, headless=False, timeout_sec=300)
+            except Exception as e:
+                self.after(0, lambda: self.log(f"❌ Capture error: {e}"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Browser capture failed:\n{str(e)[:200]}"))
+        
+        threading.Thread(target=capture_thread, daemon=True).start()
+    
+    def start_batch_download(self):
+        """Start batch download"""
+        urls_text = self.batch_textbox.get("1.0", "end").strip()
+        
+        if not urls_text:
+            messagebox.showwarning("Warning", "Please enter URLs (one per line)!")
+            return
+        
+        urls = [line.strip() for line in urls_text.split('\n') if line.strip() and 'http' in line]
+        
+        if not urls:
+            messagebox.showwarning("Warning", "No valid URLs found!")
+            return
+        
+        self.log(f"📋 Starting batch download: {len(urls)} videos")
+        
+        quality = self.quality_var.get()
+        output_path = self.path_entry.get().strip() or str(Path.home() / "Downloads")
+        
+        def batch_thread():
+            success_count = 0
+            fail_count = 0
+            
+            for i, url in enumerate(urls, 1):
+                if self.download_manager.is_cancelled:
+                    break
+                
+                self.after(0, lambda i=i, total=len(urls): self.log(f"📥 [{i}/{total}] Downloading..."))
+                
+                try:
+                    result = self.download_manager.download(url, quality, output_path)
+                    
+                    if result['success']:
+                        success_count += 1
+                        info = result.get('info', {})
+                        title = info.get('title', 'Video')
+                        filesize = info.get('filesize', 0) or info.get('file_size', 0)
+                        duration = info.get('duration', 0)
+                        comp_time = result.get('completion_time', 0)
+                        
+                        filepath = result.get('filepath', output_path)
+                        if isinstance(info, dict) and 'requested_downloads' in info:
+                            if info['requested_downloads']:
+                                filepath = info['requested_downloads'][0].get('filepath', output_path)
+                        
+                        self.db.add_download(
+                            url=url,
+                            title=title,
+                            site=info.get('extractor', 'Unknown'),
+                            quality=quality,
+                            file_path=filepath,
+                            file_size=filesize,
+                            duration=duration,
+                            completion_time=comp_time,
+                            avg_speed=0
+                        )
+                        self.after(0, lambda: self.log(f"✅ Success!"))
+                    else:
+                        fail_count += 1
+                        self.after(0, lambda e=result.get('error'): self.log(f"❌ Failed: {e}"))
+                
+                except Exception as e:
+                    fail_count += 1
+                    self.after(0, lambda e=e: self.log(f"❌ Error: {e}"))
+            
+            # Summary
+            self.after(0, lambda: self.log(f"\n📊 Batch complete: {success_count} success, {fail_count} failed"))
+            self.after(0, lambda: messagebox.showinfo(
+                "Batch Complete",
+                f"Batch download finished!\n\n✅ Success: {success_count}\n❌ Failed: {fail_count}"
+            ))
+            self.after(0, self.load_stats)
+        
+        threading.Thread(target=batch_thread, daemon=True).start()
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MENU METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    def open_settings(self):
+        """Open settings dialog"""
+        messagebox.showinfo(
+            "Settings",
+            "Settings feature coming soon!\n\n"
+            "Planned features:\n"
+            "- Default quality\n"
+            "- Default output path\n"
+            "- Theme customization\n"
+            "- Advanced options"
+        )
+
+    def show_help(self):
+        """Show help dialog"""
+        help_text = """
+    🎬 Ultimate Video Downloader Pro - Help
+
+    📥 Download Tab:
+    1. Paste or enter video URL
+    2. Select quality
+    3. Choose output folder
+    4. Click 'Download Video'
+
+    🌐 Browser Capture:
+    For sites not supported by yt-dlp:
+    1. Enter page URL
+    2. Click 'Browser Capture'
+    3. Play the video in browser
+    4. Stream URL will be captured automatically
+
+    📋 Batch Download:
+    1. Go to Batch tab
+    2. Enter URLs (one per line)
+    3. Click 'Start Batch Download'
+
+    📊 History:
+    View all your past downloads and statistics
+
+    ⚙️ Tips:
+    - Use 'Analyze' to check video info before downloading
+    - Browser Capture works on most video sites
+    - Check the log at the bottom for real-time updates
+    """
+        messagebox.showinfo("Help", help_text)
+
+    def on_closing(self):
+        """Handle window close"""
+        if self.is_downloading:
+            if messagebox.askyesno("Confirm Exit", "Download in progress. Are you sure you want to exit?"):
+                self.download_manager.cancel()
+                if self.capture_engine:
+                    try:
+                        self.capture_engine.stop()
+                    except:
+                        pass
+                self.db.close()
+                self.destroy()
+        else:
+            if self.capture_engine:
+                try:
+                    self.capture_engine.stop()
+                except:
+                    pass
+            self.db.close()
+            self.destroy()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN APPLICATION - WITH STATE SAVING FIX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class UltimateDownloaderV9(ctk.CTk):
+    """Ultra-Modern Video Downloader - Production Ready"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Window configuration
+        self.title("🎬 Ultimate Video Downloader Pro")
+        self.geometry("1400x900")
+        self.minsize(1300, 850)
+        
+        # Configure window
+        self.configure(fg_color=Theme.BG_PRIMARY)
+        
+        # State management
+        self.is_downloading = False
+        self.download_path = str(Path.home() / "Downloads")
+        self._log_buffer = []  # Buffer for early log messages
+        
+        # Initialize database
+        self.db = DatabaseManager()
+        self.capture_engine = None
+        
+        # Setup UI (this creates update_progress method at line 2185)
+        self.setup_ui()
+        
+        # NOW create download manager (after update_progress exists)
+        self.download_manager = DownloadManager(
+            progress_callback=lambda data: self.update_progress(data),
+            log_callback=self.log
+        )
+
+        
+        # Load stats
+        self.load_stats()
+
+
+    def create_interface(self):
+        """Create ultra-modern interface"""
+        
+        # Modern sidebar with gradient effect
+        self.sidebar = ctk.CTkFrame(self, width=280, corner_radius=0, fg_color=Theme.BG_SECONDARY)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
-        # Logo
+        # Logo section with modern styling
         logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        logo_frame.pack(pady=(30, 10))
+        logo_frame.pack(pady=(Theme.PADDING_XLARGE, Theme.PADDING_MEDIUM))
         
-        ctk.CTkLabel(logo_frame, text="🎥", font=ctk.CTkFont(size=50)).pack()
-        ctk.CTkLabel(logo_frame, text="ULTIMATE", font=ctk.CTkFont(size=20, weight="bold")).pack()
-        ctk.CTkLabel(logo_frame, text="v9.0 Final", font=ctk.CTkFont(size=10), text_color="gray").pack()
+        ctk.CTkLabel(logo_frame, text="🎥", font=ctk.CTkFont(size=56)).pack()
+        ctk.CTkLabel(logo_frame, text="ULTIMATE", 
+                    font=ctk.CTkFont(size=24, weight="bold"),
+                    text_color=Theme.ACCENT_PRIMARY).pack(pady=(5, 0))
+        ctk.CTkLabel(logo_frame, text="Video Downloader", 
+                    font=ctk.CTkFont(size=12),
+                    text_color=Theme.TEXT_SECONDARY).pack()
+        ctk.CTkLabel(logo_frame, text="Modern Edition", 
+                    font=ctk.CTkFont(size=10),
+                    text_color=Theme.TEXT_MUTED).pack()
         
-        # Navigation - ✅ MODIFIED to use switch_page
+        # Navigation with modern buttons
         nav_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        nav_frame.pack(fill="both", expand=True, pady=20)
+        nav_frame.pack(fill="both", expand=True, pady=Theme.PADDING_LARGE, padx=Theme.PADDING_MEDIUM)
         
         nav_items = [
-            ("📥 Download", "download", lambda: self.switch_page(self.show_download_page)),
-            ("📋 Batch", "batch", lambda: self.switch_page(self.show_batch_page)),
-            ("📊 Statistics", "stats", lambda: self.switch_page(self.show_stats_page)),
-            ("📚 History", "history", lambda: self.switch_page(self.show_history_page)),
-            ("ℹ️ About", "about", lambda: self.switch_page(self.show_about_page)),
+            ("📥", "Download", "download", lambda: self.switch_page(self.show_download_page)),
+            ("📋", "Batch", "batch", lambda: self.switch_page(self.show_batch_page)),
+            ("📊", "Statistics", "stats", lambda: self.switch_page(self.show_stats_page)),
+            ("📚", "History", "history", lambda: self.switch_page(self.show_history_page)),
+            ("ℹ️", "About", "about", lambda: self.switch_page(self.show_about_page)),
         ]
         
         self.nav_buttons = {}
-        for text, key, command in nav_items:
-            btn = ctk.CTkButton(nav_frame, text=text, command=command, width=200, height=45,
-                               font=ctk.CTkFont(size=14), anchor="w", fg_color="transparent",
-                               hover_color=("gray70", "gray30"))
-            btn.pack(pady=3, padx=10)
+        for icon, text, key, command in nav_items:
+            btn_frame = ctk.CTkFrame(nav_frame, fg_color="transparent", height=50)
+            btn_frame.pack(fill="x", pady=Theme.PADDING_TINY)
+            
+            btn = ctk.CTkButton(
+                btn_frame, 
+                text=f"{icon}  {text}", 
+                command=command, 
+                height=48,
+                font=ctk.CTkFont(size=14, weight="normal"), 
+                anchor="w",
+                fg_color="transparent",
+                hover_color=Theme.BG_TERTIARY,
+                text_color=Theme.TEXT_SECONDARY,
+                corner_radius=Theme.RADIUS_SMALL
+            )
+            btn.pack(fill="x", padx=Theme.PADDING_SMALL)
             self.nav_buttons[key] = btn
         
-        # DB size
-        status_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        status_frame.pack(side="bottom", pady=20, padx=10)
+        # Status section at bottom
+        status_frame = ctk.CTkFrame(self.sidebar, fg_color=Theme.BG_TERTIARY, corner_radius=Theme.RADIUS_SMALL)
+        status_frame.pack(side="bottom", pady=Theme.PADDING_LARGE, padx=Theme.PADDING_MEDIUM, fill="x")
         
         db_size = self.db.get_database_size()
-        self.db_label = ctk.CTkLabel(status_frame, text=f"💾 DB: {db_size:.1f} MB",
-                                     font=ctk.CTkFont(size=10), text_color="gray")
-        self.db_label.pack()
+        self.db_label = ctk.CTkLabel(
+            status_frame, 
+            text=f"💾 Database: {db_size:.1f} MB",
+            font=ctk.CTkFont(size=11),
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.db_label.pack(pady=Theme.PADDING_SMALL)
         
-        # Main content
-        self.main_content = ctk.CTkFrame(self, corner_radius=0)
+        # Main content area
+        self.main_content = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.BG_PRIMARY)
         self.main_content.pack(side="right", fill="both", expand=True)
         
+        # Show initial page
         self.show_download_page()
-        
-        # Start background updates (non-blocking)
-        pass
     
     # ✅ NEW METHODS FOR STATE SAVING
     
@@ -1407,163 +2752,368 @@ class UltimateDownloaderV9(ctk.CTk):
     # ✅ REST OF THE CODE STAYS THE SAME - Just need to modify show_download_page and show_batch_page slightly
     
     def show_download_page(self):
-        """Download page - WITH STATE RESTORATION"""
+        """Modern download page with state restoration"""
         self.clear_content()
         self.highlight_nav("download")
         
-        scroll = ctk.CTkScrollableFrame(self.main_content)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        # Scrollable container
+        scroll = ctk.CTkScrollableFrame(self.main_content, fg_color=Theme.BG_PRIMARY)
+        scroll.pack(fill="both", expand=True, padx=Theme.PADDING_LARGE, pady=Theme.PADDING_LARGE)
         
-        # Header
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
+        # Modern header with gradient effect
+        header_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_LARGE)
+        header_card.pack(fill="x", pady=(0, Theme.PADDING_LARGE))
         
-        ctk.CTkLabel(header, text="📥 Single Video Download", font=ctk.CTkFont(size=32, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(header, text="Dynamic quality detection • Auto MP4 format • 1800+ sites",
-                    font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", pady=(5, 0))
+        header_content = ctk.CTkFrame(header_card, fg_color="transparent")
+        header_content.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=Theme.PADDING_XLARGE)
         
-        # Quick actions
-        quick = ctk.CTkFrame(scroll, fg_color="transparent")
-        quick.pack(fill="x", pady=(0, 15))
+        ctk.CTkLabel(
+            header_content, 
+            text="📥 Single Video Download", 
+            font=ctk.CTkFont(size=34, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(anchor="w")
         
-        ctk.CTkButton(quick, text="📋 Paste", command=self.paste_url, width=120, height=38).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(quick, text="📂 Open Folder", command=self.open_folder, width=140, height=38).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(quick, text="➕ Add to Queue", command=self.add_to_queue, width=140, height=38).pack(side="left")
+        ctk.CTkLabel(
+            header_content, 
+            text="Dynamic quality detection • Auto MP4 format • 1800+ sites supported",
+            font=ctk.CTkFont(size=13),
+            text_color=Theme.TEXT_SECONDARY
+        ).pack(anchor="w", pady=(8, 0))
         
-        # URL Input
-        url_frame = ctk.CTkFrame(scroll)
-        url_frame.pack(fill="x", pady=(0, 15))
+        # Quick actions bar
+        quick_actions = ctk.CTkFrame(scroll, fg_color="transparent")
+        quick_actions.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
         
-        ctk.CTkLabel(url_frame, text="📎 Video URL", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(20, 8))
+        ctk.CTkButton(
+            quick_actions, 
+            text="📋 Paste", 
+            command=self.paste_url, 
+            width=130, 
+            height=40,
+            font=ctk.CTkFont(size=12),
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        ).pack(side="left", padx=(0, Theme.PADDING_SMALL))
         
-        url_input = ctk.CTkFrame(url_frame, fg_color="transparent")
-        url_input.pack(fill="x", padx=20, pady=(0, 20))
+        ctk.CTkButton(
+            quick_actions, 
+            text="📂 Open Folder", 
+            command=self.open_folder, 
+            width=150, 
+            height=40,
+            font=ctk.CTkFont(size=12),
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        ).pack(side="left", padx=(0, Theme.PADDING_SMALL))
         
-        self.url_entry = ctk.CTkEntry(url_input, placeholder_text="Paste video URL here...", height=50, font=ctk.CTkFont(size=14))
-        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ctk.CTkButton(
+            quick_actions, 
+            text="➕ Add to Queue", 
+            command=self.add_to_queue, 
+            width=150, 
+            height=40,
+            font=ctk.CTkFont(size=12),
+            fg_color=Theme.ACCENT_SECONDARY,
+            hover_color=Theme.ACCENT_TERTIARY,
+            corner_radius=Theme.RADIUS_SMALL
+        ).pack(side="left")
+        
+        # URL Input Card
+        url_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
+        url_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
+        
+        ctk.CTkLabel(
+            url_card, 
+            text="📎 Video URL", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
+        
+        url_input_frame = ctk.CTkFrame(url_card, fg_color="transparent")
+        url_input_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
+        
+        self.url_entry = ctk.CTkEntry(
+            url_input_frame, 
+            placeholder_text="Paste video URL here...", 
+            height=Theme.INPUT_HEIGHT, 
+            font=ctk.CTkFont(size=14),
+            fg_color=Theme.BG_INPUT,
+            border_color=Theme.BORDER,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        )
+        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
         self.url_entry.bind("<Return>", lambda e: self.detect_video())
         
-        # ✅ RESTORE saved URL
+        # Restore saved URL
         if self.saved_url:
             self.url_entry.insert(0, self.saved_url)
 
-        # Add Capture via Browser button
+        # Capture via Browser button
         self.capture_btn = ctk.CTkButton(
-            url_input,
-            text="🕵️ Capture via Browser",
+            url_input_frame,
+            text="🕵️ Capture",
             command=self.start_browser_capture,
-            width=210, height=50,
-            font=ctk.CTkFont(size=15, weight="bold"),
-            fg_color="#334155", hover_color="#1f2937"
+            width=160, 
+            height=Theme.INPUT_HEIGHT,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
         )
-        self.capture_btn.pack(side="right", padx=(0, 10))
+        self.capture_btn.pack(side="right", padx=(0, Theme.PADDING_SMALL))
         
-        detect_btn = ctk.CTkButton(url_input, text="🔍 Analyze", command=self.detect_video, width=130, height=50,
-                                   font=ctk.CTkFont(size=15, weight="bold"), fg_color="#10b981", hover_color="#059669")
+        # Analyze button
+        detect_btn = ctk.CTkButton(
+            url_input_frame, 
+            text="🔍 Analyze", 
+            command=self.detect_video, 
+            width=140, 
+            height=Theme.INPUT_HEIGHT,
+            font=ctk.CTkFont(size=13, weight="bold"), 
+            fg_color=Theme.SUCCESS, 
+            hover_color="#059669",
+            corner_radius=Theme.RADIUS_SMALL
+        )
         detect_btn.pack(side="right")
         
-        self.site_label = ctk.CTkLabel(url_frame, text="", font=ctk.CTkFont(size=12), text_color="gray")
-        self.site_label.pack(anchor="w", padx=20, pady=(0, 15))
+        self.site_label = ctk.CTkLabel(
+            url_card, 
+            text="", 
+            font=ctk.CTkFont(size=12), 
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.site_label.pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
         
-        # Video Info
-        self.info_frame = ctk.CTkFrame(scroll)
+        # Video Info Card
+        self.info_frame = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
         
         info_content = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        info_content.pack(fill="x", padx=20, pady=20)
+        info_content.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=Theme.PADDING_XLARGE)
         
-        self.title_label = ctk.CTkLabel(info_content, text="", font=ctk.CTkFont(size=12), anchor="w", wraplength=900)
-        self.title_label.pack(anchor="w", pady=3)
+        self.title_label = ctk.CTkLabel(
+            info_content, 
+            text="", 
+            font=ctk.CTkFont(size=13, weight="bold"), 
+            anchor="w", 
+            wraplength=1000,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        self.title_label.pack(anchor="w", pady=5)
         
-        self.duration_label = ctk.CTkLabel(info_content, text="", font=ctk.CTkFont(size=12), anchor="w")
+        self.duration_label = ctk.CTkLabel(
+            info_content, 
+            text="", 
+            font=ctk.CTkFont(size=12), 
+            anchor="w",
+            text_color=Theme.TEXT_SECONDARY
+        )
         self.duration_label.pack(anchor="w", pady=3)
         
-        self.size_label = ctk.CTkLabel(info_content, text="", font=ctk.CTkFont(size=12), anchor="w")
+        self.size_label = ctk.CTkLabel(
+            info_content, 
+            text="", 
+            font=ctk.CTkFont(size=12), 
+            anchor="w",
+            text_color=Theme.TEXT_SECONDARY
+        )
         self.size_label.pack(anchor="w", pady=3)
         
-        # Quality Selection
-        quality_frame = ctk.CTkFrame(scroll)
-        quality_frame.pack(fill="x", pady=(0, 15))
+        # Quality Selection Card
+        quality_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
+        quality_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
         
-        ctk.CTkLabel(quality_frame, text="🎬 Quality (Dynamic Detection)", 
-                    font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(20, 10))
+        ctk.CTkLabel(
+            quality_card, 
+            text="🎬 Quality Selection", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
         
         self.quality_var = ctk.StringVar(value='best')
-        self.quality_buttons_frame = ctk.CTkFrame(quality_frame, fg_color="transparent")
-        self.quality_buttons_frame.pack(fill="x", padx=20, pady=(0, 20))
+        self.quality_buttons_frame = ctk.CTkFrame(quality_card, fg_color="transparent")
+        self.quality_buttons_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
         
         self.create_default_quality_buttons()
         
-        # ✅ RESTORE detected info if available
+        # Restore detected info if available
         if self.saved_url and self.saved_detected_info and self.video_info:
             self.after(100, lambda: self._update_info_and_qualities(self.video_info))
         
-        # Path
-        path_frame = ctk.CTkFrame(scroll)
-        path_frame.pack(fill="x", pady=(0, 15))
+        # Save Location Card
+        path_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
+        path_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
         
-        ctk.CTkLabel(path_frame, text="💾 Save Location", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(20, 10))
+        ctk.CTkLabel(
+            path_card, 
+            text="💾 Save Location", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
         
-        path_inner = ctk.CTkFrame(path_frame, fg_color="transparent")
-        path_inner.pack(fill="x", padx=20, pady=(0, 20))
+        path_inner = ctk.CTkFrame(path_card, fg_color="transparent")
+        path_inner.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
         
-        self.path_entry = ctk.CTkEntry(path_inner, height=42, font=ctk.CTkFont(size=13))
-        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.path_entry = ctk.CTkEntry(
+            path_inner, 
+            height=42, 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.BG_INPUT,
+            border_color=Theme.BORDER,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        )
+        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
         self.path_entry.insert(0, self.download_path)
         
-        ctk.CTkButton(path_inner, text="📁 Browse", command=self.browse_folder, width=120, height=42).pack(side="right")
+        ctk.CTkButton(
+            path_inner, 
+            text="📁 Browse", 
+            command=self.browse_folder, 
+            width=130, 
+            height=42,
+            font=ctk.CTkFont(size=12),
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        ).pack(side="right")
         
-        # Download Button
-        btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, 15))
+        # Download Button Card
+        btn_card = ctk.CTkFrame(scroll, fg_color="transparent")
+        btn_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
         
-        self.download_btn = ctk.CTkButton(btn_frame, text="⬇️ DOWNLOAD NOW", command=self.start_download,
-                                         height=65, font=ctk.CTkFont(size=20, weight="bold"),
-                                         fg_color="#2563eb", hover_color="#1d4ed8", corner_radius=12)
-        self.download_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.download_btn = ctk.CTkButton(
+            btn_card, 
+            text="⬇️ DOWNLOAD NOW", 
+            command=self.start_download,
+            height=65, 
+            font=ctk.CTkFont(size=20, weight="bold"),
+            fg_color=Theme.ACCENT_PRIMARY, 
+            hover_color=Theme.HOVER, 
+            corner_radius=Theme.RADIUS_MEDIUM,
+            text_color=Theme.BG_PRIMARY
+        )
+        self.download_btn.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
         
-        self.cancel_btn = ctk.CTkButton(btn_frame, text="🛑 Cancel", command=self.cancel_download,
-                                        height=65, width=150, font=ctk.CTkFont(size=16, weight="bold"),
-                                        fg_color="#dc2626", hover_color="#991b1b", state="disabled")
+        self.cancel_btn = ctk.CTkButton(
+            btn_card, 
+            text="🛑 Cancel", 
+            command=self.cancel_download,
+            height=65, 
+            width=160, 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color=Theme.ERROR, 
+            hover_color="#dc2626", 
+            state="disabled",
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
         self.cancel_btn.pack(side="right")
         
-        # Progress
-        progress_frame = ctk.CTkFrame(scroll)
-        progress_frame.pack(fill="x")
+        # Progress Card
+        progress_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
+        progress_card.pack(fill="x")
         
-        ctk.CTkLabel(progress_frame, text="📊 Download Progress", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(20, 15))
+        ctk.CTkLabel(
+            progress_card, 
+            text="📊 Download Progress", 
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_MEDIUM))
         
-        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=30, corner_radius=15)
-        self.progress_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.progress_bar = ctk.CTkProgressBar(
+            progress_card, 
+            height=32, 
+            corner_radius=Theme.RADIUS_SMALL,
+            fg_color=Theme.BG_INPUT,
+            progress_color=Theme.ACCENT_PRIMARY
+        )
+        self.progress_bar.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
         self.progress_bar.set(0)
         
         # Stats
-        stats_frame = ctk.CTkFrame(progress_frame, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=20, pady=(0, 12))
+        stats_frame = ctk.CTkFrame(progress_card, fg_color="transparent")
+        stats_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
         
-        self.progress_percent = ctk.CTkLabel(stats_frame, text="0%", font=ctk.CTkFont(size=14, weight="bold"))
-        self.progress_percent.pack(side="left", padx=(0, 25))
+        self.progress_percent = ctk.CTkLabel(
+            stats_frame, 
+            text="0%", 
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=Theme.ACCENT_PRIMARY
+        )
+        self.progress_percent.pack(side="left", padx=(0, 30))
         
-        self.speed_label = ctk.CTkLabel(stats_frame, text="Speed: 0 MB/s", font=ctk.CTkFont(size=12))
-        self.speed_label.pack(side="left", padx=(0, 25))
+        self.speed_label = ctk.CTkLabel(
+            stats_frame, 
+            text="Speed: 0 MB/s", 
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.speed_label.pack(side="left", padx=(0, 30))
         
-        self.eta_label = ctk.CTkLabel(stats_frame, text="ETA: --:--", font=ctk.CTkFont(size=12))
-        self.eta_label.pack(side="left", padx=(0, 25))
+        self.eta_label = ctk.CTkLabel(
+            stats_frame, 
+            text="ETA: --:--", 
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.eta_label.pack(side="left", padx=(0, 30))
         
-        self.size_progress_label = ctk.CTkLabel(stats_frame, text="0 MB / 0 MB", font=ctk.CTkFont(size=12))
+        self.size_progress_label = ctk.CTkLabel(
+            stats_frame, 
+            text="0 MB / 0 MB", 
+            font=ctk.CTkFont(size=12),
+            text_color=Theme.TEXT_SECONDARY
+        )
         self.size_progress_label.pack(side="left")
         
-        self.status_label = ctk.CTkLabel(progress_frame, text="Ready", font=ctk.CTkFont(size=13), text_color="gray")
-        self.status_label.pack(anchor="w", padx=20, pady=(0, 12))
+        self.status_label = ctk.CTkLabel(
+            progress_card, 
+            text="Ready", 
+            font=ctk.CTkFont(size=13), 
+            text_color=Theme.TEXT_MUTED
+        )
+        self.status_label.pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
         
-        # Console
-        log_header = ctk.CTkFrame(progress_frame, fg_color="transparent")
-        log_header.pack(fill="x", padx=20, pady=(5, 8))
+        # Console Log
+        log_header = ctk.CTkFrame(progress_card, fg_color="transparent")
+        log_header.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_SMALL, Theme.PADDING_SMALL))
         
-        ctk.CTkLabel(log_header, text="📜 Console Log", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
-        ctk.CTkButton(log_header, text="🗑️ Clear", command=self.clear_log, width=80, height=28).pack(side="right")
+        ctk.CTkLabel(
+            log_header, 
+            text="📜 Console Log", 
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(side="left")
         
-        self.log_text = ctk.CTkTextbox(progress_frame, height=130, font=ctk.CTkFont(size=11, family="Consolas"))
-        self.log_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        ctk.CTkButton(
+            log_header, 
+            text="🗑️ Clear", 
+            command=self.clear_log, 
+            width=90, 
+            height=32,
+            font=ctk.CTkFont(size=11),
+            fg_color=Theme.BG_TERTIARY,
+            hover_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        ).pack(side="right")
+        
+        self.log_text = ctk.CTkTextbox(
+            progress_card, 
+            height=140, 
+            font=ctk.CTkFont(size=11, family="Consolas"),
+            fg_color=Theme.BG_INPUT,
+            text_color=Theme.TEXT_PRIMARY,
+            corner_radius=Theme.RADIUS_SMALL
+        )
+        self.log_text.pack(fill="both", expand=True, padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
         
         self.log("✅ System ready • v9.0 Final Edition")
         self.log(f"📁 Save location: {self.download_path}")
@@ -1573,36 +3123,124 @@ class UltimateDownloaderV9(ctk.CTk):
             self.log("💡 Paste URL and click Analyze to detect available qualities")
     
     def create_default_quality_buttons(self):
-        """Create default quality buttons"""
+        """Create default quality buttons with modern styling"""
         for widget in self.quality_buttons_frame.winfo_children():
             widget.destroy()
         
-        ctk.CTkRadioButton(self.quality_buttons_frame, text="🌟 Best Quality", 
-                          variable=self.quality_var, value="best", font=ctk.CTkFont(size=13)).pack(anchor="w", pady=4)
-        ctk.CTkRadioButton(self.quality_buttons_frame, text="🎵 Audio Only (MP3)", 
-                          variable=self.quality_var, value="audio", font=ctk.CTkFont(size=13)).pack(anchor="w", pady=4)
+        # Ensure quality_var exists
+        if not hasattr(self, 'quality_var'):
+            self.quality_var = ctk.StringVar(value='best')
         
-        ctk.CTkLabel(self.quality_buttons_frame, text="▶️ Click 'Analyze' to detect available qualities",
-                    font=ctk.CTkFont(size=11), text_color="gray").pack(anchor="w", pady=(10, 0))
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame, 
+            text="🏆 Best", 
+            variable=self.quality_var, 
+            value="best", 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(anchor="w", pady=6)
+        
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame, 
+            text="📺 1080p", 
+            variable=self.quality_var, 
+            value="1080p", 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(anchor="w", pady=6)
+        
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame, 
+            text="🎬 720p", 
+            variable=self.quality_var, 
+            value="720p", 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(anchor="w", pady=6)
+        
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame, 
+            text="📱 480p", 
+            variable=self.quality_var, 
+            value="480p", 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(anchor="w", pady=6)
+        
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame, 
+            text="🎵 Audio", 
+            variable=self.quality_var, 
+            value="audio", 
+            font=ctk.CTkFont(size=13),
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(anchor="w", pady=6)
+        
+        ctk.CTkLabel(
+            self.quality_buttons_frame, 
+            text="▶️ Click 'Analyze' to detect available qualities",
+            font=ctk.CTkFont(size=11), 
+            text_color=Theme.TEXT_MUTED
+        ).pack(anchor="w", pady=(12, 0))
     
-    def create_dynamic_quality_buttons(self, qualities):
-        """Create quality buttons based on detected video"""
+    def create_dynamic_quality_buttons(self, heights):
+        """Rebuild quality buttons with detected video formats"""
+        # Clear old buttons
         for widget in self.quality_buttons_frame.winfo_children():
             widget.destroy()
         
-        ctk.CTkRadioButton(self.quality_buttons_frame, text="🌟 Best Quality", 
-                          variable=self.quality_var, value="best", font=ctk.CTkFont(size=13)).pack(anchor="w", pady=4)
+        # Reset variable
+        self.quality_var = tk.StringVar(value="best")
         
-        for quality in qualities:
-            ctk.CTkRadioButton(self.quality_buttons_frame, text=f"📺 {quality}p", 
-                              variable=self.quality_var, value=f"{quality}p", 
-                              font=ctk.CTkFont(size=13)).pack(anchor="w", pady=4)
+        # Best option
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame,
+            text="🏆 Best",
+            variable=self.quality_var,
+            value="best",
+            font=Theme.FONT_BODY,
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(side="left", padx=10, pady=5)
         
-        ctk.CTkRadioButton(self.quality_buttons_frame, text="🎵 Audio Only (MP3)", 
-                          variable=self.quality_var, value="audio", font=ctk.CTkFont(size=13)).pack(anchor="w", pady=4)
+        # Detected qualities (top 5)
+        for h in heights[:5]:
+            ctk.CTkRadioButton(
+                self.quality_buttons_frame,
+                text=f"📺 {h}p",
+                variable=self.quality_var,
+                value=f"{h}p",
+                font=Theme.FONT_BODY,
+                fg_color=Theme.ACCENT_PRIMARY,
+                text_color=Theme.TEXT_PRIMARY,
+                hover_color=Theme.HOVER
+            ).pack(side="left", padx=10, pady=5)
         
-        self.log(f"✅ Detected {len(qualities)} quality options")
-    
+        # Audio option
+        ctk.CTkRadioButton(
+            self.quality_buttons_frame,
+            text="🎵 Audio",
+            variable=self.quality_var,
+            value="audio",
+            font=Theme.FONT_BODY,
+            fg_color=Theme.ACCENT_PRIMARY,
+            text_color=Theme.TEXT_PRIMARY,
+            hover_color=Theme.HOVER
+        ).pack(side="left", padx=10, pady=5)
+        
+        self.log(f"✅ Updated quality buttons: {len(heights)} formats detected")
+
     def show_batch_page(self):
         """Batch page - WITH STATE RESTORATION"""
         self.clear_content()
@@ -1962,8 +3600,21 @@ class UltimateDownloaderV9(ctk.CTk):
             widget.destroy()
     
     def highlight_nav(self, active):
+        """Highlight active navigation button with modern styling"""
+        self.current_page = active
         for key, btn in self.nav_buttons.items():
-            btn.configure(fg_color=("gray75", "gray25") if key == active else "transparent")
+            if key == active:
+                btn.configure(
+                    fg_color=Theme.BG_TERTIARY,
+                    text_color=Theme.ACCENT_PRIMARY,
+                    font=ctk.CTkFont(size=14, weight="bold")
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=Theme.TEXT_SECONDARY,
+                    font=ctk.CTkFont(size=14, weight="normal")
+                )
     
     def log(self, msg):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -2568,7 +4219,16 @@ if __name__ == "__main__":
     except RuntimeError:
         pass  # Already set
     
-    # Launch the application
-    app = UltimateDownloaderV9()
-    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    # Choose GUI version:
+    # - UltimateDownloaderV9: Full-featured with sidebar navigation
+    # - UltimateDownloaderModern: Ultra-modern tabbed interface (Complete!)
+    USE_MODERN_GUI = True  # Set to False to use the classic V9 interface
+    
+    if USE_MODERN_GUI:
+        app = UltimateDownloaderModern()
+        app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    else:
+        app = UltimateDownloaderV9()
+        app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    
     app.mainloop()
