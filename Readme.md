@@ -84,10 +84,7 @@ A professional-grade video downloader with enterprise browser capture engine. Do
 
 # 🎬 Ultimate Video Downloader
 
-[
-[
-[
-[
+
 
 A professional-grade video downloader with an enterprise-level browser capture engine. Download videos from 1700+ sites including YouTube, Twitter, Instagram, Reddit, TikTok, Vimeo, and more—even from unsupported sites using advanced stream interception.
 
@@ -95,7 +92,7 @@ A professional-grade video downloader with an enterprise-level browser capture e
 
 - 📹 **1700+ Supported Sites** - Powered by yt-dlp for YouTube, Twitter, Reddit, Facebook, and beyond
 - 🌐 **Browser Capture Engine** - Intercept and download video streams from ANY website using Playwright automation
-- 🎯 **Smart Quality Selection** - Dynamic detection of available qualities: 4K (2160p), 2K (1440p), 1080p, 720p, 480p, 360p, 240p, 144p, or audio-only
+- 🎯 **Smart Quality Selection** - Dynamic detection of available qualities: 4K (2160p), 2K (1440p), 1080p, 720p, 480p, 360p, 240p, 144p, Audio-only
 - 📊 **Batch Downloads** - Queue and process multiple URLs with consistent quality settings across all videos
 - 🗃️ **Download History** - SQLite-based tracking with search, statistics, and export options
 - 🎨 **Modern GUI** - Sleek, dark-mode interface built with CustomTkinter for a native Windows experience
@@ -113,7 +110,6 @@ A professional-grade video downloader with an enterprise-level browser capture e
 4. **Download**: Hit **"Download"** or add to batch for multiple videos
 5. **Track Progress**: Watch real-time logs and history updates
 
-Watch a [quick demo video](https://www.youtube.com/watch?v=example) or check the [full documentation](docs/USAGE.md) for advanced tips.
 
 ## 📋 Requirements
 
