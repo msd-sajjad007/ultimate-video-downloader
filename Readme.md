@@ -186,8 +186,6 @@ pyinstaller  # For building .exe
 
 ### Download History
 - Switch to **History** tab to view past downloads
-- Search by title, URL, or date
-- Re-download failed items or export to CSV
 
 ### Tips
 - **Quality Selection**: "Best" gets the highest available; specific resolutions (e.g., 720p) cap at that height
