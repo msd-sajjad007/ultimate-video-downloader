@@ -163,7 +163,7 @@ pyinstaller  # For building .exe
 
 1. Install PyInstaller: `pip install pyinstaller`
 2. Run: `pyinstaller video_downloader_COMPLETE.spec`
-3. Find the executable in `dist/UltimateVideoDownloader/`
+3. Find the executable in `dist/UltimateVideoDownloader`
 
 ## 📖 Usage
 
