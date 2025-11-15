@@ -1,73 +1,111 @@
 
-# ”9Á0 Ultimate Video Downloader
+# 🎬 Ultimate Video Downloader
+
+
 
 A professional-grade video downloader with enterprise browser capture engine. Download videos from 1700+ sites including YouTube, Twitter, Reddit, and more.
 
+
+
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
+
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 
-## 7¿8 Features
-
-- ”9â3 **Download from 1700+ sites** - Powered by yt-dlp
-- ”9±4 **Browser Capture Engine** - Intercepts video streams from ANY website
-- ”9Á3 **Smart Quality Selection** - Choose from 4K, 1080p, 720p, 480p, audio-only
-- ”9Ý6 **Batch Downloads** - Queue multiple videos
-- ”9ö5„1‚5 **Download History** - SQLite database tracking
-- ”9À6 **Modern GUI** - Built with CustomTkinter
-- 7²3 **Fast & Reliable** - Multi-threaded downloads
-- •0“5 **Cancel Support** - Stop downloads anytime
 
 
-## ”9õ8„1‚5 Screenshots
+## ✨ Features
+
+
+
+- 📹 **Download from 1700+ sites** - Powered by yt-dlp
+
+- 🌐 **Browser Capture Engine** - Intercepts video streams from ANY website
+
+- 🎯 **Smart Quality Selection** - Choose from 4K, 1080p, 720p, 480p, audio-only
+
+- 📊 **Batch Downloads** - Queue multiple videos
+
+- 🗃️ **Download History** - SQLite database tracking
+
+- 🎨 **Modern GUI** - Built with CustomTkinter
+
+- ⚡ **Fast & Reliable** - Multi-threaded downloads
+
+- 🛑 **Cancel Support** - Stop downloads anytime
+
+
+## 🖼️ Screenshots
+
+
 
 ### Main Interface
+
 ![Main Interface](screenshots/1.png)
 
+
+
 ### Batch Download
+
 ![Batch Download](screenshots/2.png)
 
+
+
 ### Download History
+
 ![Download History](screenshots/3.png)
 
 
-## ”9Ý7 Requirements
+
+
+
+## 📋 Requirements
+
+
 
 - Python 3.8 or higher
+
 - Windows 10/11 (for compiled .exe)
+
 - Internet connection
 
-## •0‹4 Installation
+
+
+## 🚀 Installation
+
+
 
 ### Option 1: Run from Source (Recommended for Developers)
 
+
+
 1. **Clone the repository:**
 
-# ”9Á0 Ultimate Video Downloader
+# 🎬 Ultimate Video Downloader
 
 [
 [
 [
 [
 
-A professional-grade video downloader with an enterprise-level browser capture engine. Download videos from 1700+ sites including YouTube, Twitter, Instagram, Reddit, TikTok, Vimeo, and more¡ªeven from unsupported sites using advanced stream interception.
+A professional-grade video downloader with an enterprise-level browser capture engine. Download videos from 1700+ sites including YouTube, Twitter, Instagram, Reddit, TikTok, Vimeo, and more—even from unsupported sites using advanced stream interception.
 
-## 7¿8 Features
+## ✨ Features
 
-- ”9â3 **1700+ Supported Sites** - Powered by yt-dlp for YouTube, Twitter, Reddit, Facebook, and beyond
-- ”9±4 **Browser Capture Engine** - Intercept and download video streams from ANY website using Playwright automation
-- ”9Á3 **Smart Quality Selection** - Dynamic detection of available qualities: 4K (2160p), 2K (1440p), 1080p, 720p, 480p, 360p, 240p, 144p, or audio-only
-- ”9Ý6 **Batch Downloads** - Queue and process multiple URLs with consistent quality settings across all videos
-- ”9ö5„1‚5 **Download History** - SQLite-based tracking with search, statistics, and export options
-- ”9À6 **Modern GUI** - Sleek, dark-mode interface built with CustomTkinter for a native Windows experience
-- 7²3 **Fast & Reliable** - Multi-threaded downloads with real-time progress, speed tracking, and automatic retry
-- •0“5 **Advanced Controls** - Cancel individual/batch downloads, pause/resume, and custom output paths
-- ”9Ü7 **Smart Organization** - Automatic MP4 conversion, custom folders, and metadata embedding
-- ”9ä8 **Safe & Private** - No telemetry, local database, and secure browser sessions
+- 📹 **1700+ Supported Sites** - Powered by yt-dlp for YouTube, Twitter, Reddit, Facebook, and beyond
+- 🌐 **Browser Capture Engine** - Intercept and download video streams from ANY website using Playwright automation
+- 🎯 **Smart Quality Selection** - Dynamic detection of available qualities: 4K (2160p), 2K (1440p), 1080p, 720p, 480p, 360p, 240p, 144p, or audio-only
+- 📊 **Batch Downloads** - Queue and process multiple URLs with consistent quality settings across all videos
+- 🗃️ **Download History** - SQLite-based tracking with search, statistics, and export options
+- 🎨 **Modern GUI** - Sleek, dark-mode interface built with CustomTkinter for a native Windows experience
+- ⚡ **Fast & Reliable** - Multi-threaded downloads with real-time progress, speed tracking, and automatic retry
+- 🛑 **Advanced Controls** - Cancel individual/batch downloads, pause/resume, and custom output paths
+- 📁 **Smart Organization** - Automatic MP4 conversion, custom folders, and metadata embedding
+- 🔒 **Safe & Private** - No telemetry, local database, and secure browser sessions
 
 
-
-## ”9À3 Quick Start (Demo)
+## 🎥 Quick Start (Demo)
 
 1. **Download the App** (Windows users): Grab the latest release from [Releases](https://github.com/msd-sajjad007/ultimate-video-downloader/releases)
 2. **Run & Paste URL**: Open the app, paste a video URL (e.g., YouTube or Twitter)
@@ -77,7 +115,7 @@ A professional-grade video downloader with an enterprise-level browser capture e
 
 Watch a [quick demo video](https://www.youtube.com/watch?v=example) or check the [full documentation](docs/USAGE.md) for advanced tips.
 
-## ”9Ý7 Requirements
+## 📋 Requirements
 
 - **Python 3.8+** (for source installation)
 - **Windows 10/11** (recommended for compiled .exe; Linux/macOS via source)
@@ -93,7 +131,7 @@ sqlite3  # Built-in
 pyinstaller  # For building .exe
 ```
 
-## •0‹4 Installation
+## 🚀 Installation
 
 ### Option 1: Run from Source (Recommended for Developers)
 
@@ -123,7 +161,7 @@ pyinstaller  # For building .exe
 1. Download the latest release from [GitHub Releases](https://github.com/msd-sajjad007/ultimate-video-downloader/releases)
 2. Extract `UltimateVideoDownloader-v2.0-Windows.zip`
 3. Run `UltimateVideoDownloader.exe` (no installation needed)
-4. **Note**: Antivirus may flag it as unknown¡ªsafe, but add exception if prompted
+4. **Note**: Antivirus may flag it as unknown—safe, but add exception if prompted
 
 ### Option 3: Build Your Own .exe
 
@@ -131,19 +169,19 @@ pyinstaller  # For building .exe
 2. Run: `pyinstaller video_downloader_COMPLETE.spec`
 3. Find the executable in `dist/UltimateVideoDownloader/`
 
-## ”9Þ8 Usage
+## 📖 Usage
 
 ### Basic Download
 1. Enter a video URL in the **Download** tab
 2. Click **"Analyze"** to fetch available qualities
 3. Select quality (e.g., 1080p) and output folder
-4. Click **"Download"**¡ªprogress shows in real-time
+4. Click **"Download"**—progress shows in real-time
 
 ### Batch Download
 1. Switch to **Batch** tab
 2. Add multiple URLs (one per line or paste list)
 3. Set global quality and output path
-4. Click **"Start Batch Download"**¡ªprocesses sequentially with unified settings
+4. Click **"Start Batch Download"**—processes sequentially with unified settings
 
 ### Browser Capture (Unsupported Sites)
 1. In **Download** tab, check **"Enable Browser Capture"**
@@ -157,11 +195,11 @@ pyinstaller  # For building .exe
 
 ### Tips
 - **Quality Selection**: "Best" gets the highest available; specific resolutions (e.g., 720p) cap at that height
-- **Batch Quality**: Uses the selected quality for ALL videos¡ªgreat for consistent playlists
+- **Batch Quality**: Uses the selected quality for ALL videos—great for consistent playlists
 - **Cancel Downloads**: Click the stop button; supports mid-download cancellation
 - **Output Paths**: Defaults to `Downloads` folder; customize per download or batch
 
-## ”9±4 Supported Sites
+## 🌐 Supported Sites
 
 Powered by yt-dlp, this supports 1700+ sites out of the box:
 - **Video Platforms**: YouTube, Vimeo, Dailymotion, Twitch
@@ -171,18 +209,18 @@ Powered by yt-dlp, this supports 1700+ sites out of the box:
 
 Full list: [yt-dlp supported sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)
 
-## ”9æ9 Troubleshooting
+## 🔧 Troubleshooting
 
 - **"No video formats found"**: Try Browser Capture mode or check URL validity
 - **Playwright errors**: Run `playwright install chromium` and restart
 - **Slow downloads**: Check internet; disable VPN if using geoblocked content
-- **Antivirus blocks .exe**: Add exception¡ªit's safe (open source!)
+- **Antivirus blocks .exe**: Add exception—it's safe (open source!)
 - **Quality not available**: Some sites limit resolutions; select "Best" for automatic fallback
 - **Batch fails**: Ensure all URLs are valid; check activity log for errors
 
 For more help, open an [issue](https://github.com/msd-sajjad007/ultimate-video-downloader/issues) or check [Discussions](https://github.com/msd-sajjad007/ultimate-video-downloader/discussions).
 
-## •0Î3 Contributing
+## 🤝 Contributing
 
 1. Fork the repo
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -192,11 +230,11 @@ For more help, open an [issue](https://github.com/msd-sajjad007/ultimate-video-d
 
 We welcome GUI improvements, new site support, or bug fixes!
 
-## ”9Ý0 License
+## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## •0†5 Acknowledgments
+## 🙏 Acknowledgments
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Core download engine
 - [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) - Beautiful GUI framework
@@ -205,7 +243,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ***
 
-8¬2 **Star this repo if it helps you!** Questions? Join the [discussion](https://github.com/msd-sajjad007/ultimate-video-downloader/discussions).  
+⭐ **Star this repo if it helps you!** Questions? Join the [discussion](https://github.com/msd-sajjad007/ultimate-video-downloader/discussions).  
 
-*Built with 7Å8„1‚5 by msd-sajjad007*
+*Built with ❤️ by msd-sajjad007*
 
