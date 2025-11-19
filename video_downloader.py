@@ -772,36 +772,29 @@ class DownloadManager:
     def _format_for_quality(self, quality: str) -> str:
         """
         Map GUI quality selection to yt-dlp format string.
-        Ensures exact quality matching for user selection.
+        Priority: exact match -> downgrade -> upgrade if nothing below exists
         """
         if not quality or quality == "best":
-            # Best available video + best available audio
             return "bv*+ba/best"
         
         if quality == "audio":
-            # Best audio only
             return "bestaudio/best"
         
-        # Handle specific quality selection (e.g., "720p", "1080p", "144p")
         if quality.endswith("p"):
             try:
-                height = int(quality[:-1])  # Remove 'p' and convert to int
-                
-                # Format string breakdown:
+                height = int(quality[:-1])
+                # Priority chain:
                 # 1. Try exact height with best audio
-                # 2. Try height within ±10% tolerance with best audio
-                # 3. Fallback to best video near that height
-                # 4. Final fallback to best available
-                
-                # For better quality matching, especially for lower resolutions like 144p
-                return f"bv*[height={height}]+ba/bv*[height<={int(height*1.1)}][height>={int(height*0.9)}]+ba/b[height<={int(height*1.1)}]/best"
-                
+                # 2. Try within ±10% tolerance with best audio
+                # 3. Try anything at or below requested height
+                # 4. If nothing below exists, fallback to best (upgrade)
+                return f"bv*[height={height}]+ba/bv*[height<={int(height*1.1)}][height>={int(height*0.9)}]+ba/bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/best"
             except (ValueError, IndexError):
                 self.log(f"Invalid quality format: {quality}, using best")
                 return "bv*+ba/best"
         
-        # Default fallback
         return "bv*+ba/best"
+
 
     # ✅ Allow UI to cancel an in-flight download
     def cancel(self):
@@ -1171,16 +1164,7 @@ class DownloadManager:
         # Use site's title as filename; yt-dlp will trim via trim_file_name
         return os.path.join(outputpath, "%(title)s.%(ext)s")
 
-    def _get_format_string(self, quality):
-        """Get format string"""
-        if quality == "audio":
-            return 'bestaudio/best'
-        elif quality == "best":
-            return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
-        else:
-            height = quality.replace('p', '')
-            return f'bestvideo[height<={height}][ext=mp4]+bestaudio/bestvideo[height<={height}]+bestaudio/best'
-    
+
     def _fallback_title_from_url(self, url: str) -> str:
         """Derive a reasonable filename stem from a direct media URL."""
         try:
@@ -1901,6 +1885,49 @@ class UltimateDownloaderModern(ctk.CTk):
             text_color=Theme.TEXT_PRIMARY
         )
         self.batch_textbox.pack(fill="both", expand=True, padx=30, pady=20)
+
+        # Quality selection
+        quality_section = ctk.CTkFrame(card, fg_color="transparent")
+        quality_section.pack(fill="x", padx=30, pady=20)
+
+        quality_label = ctk.CTkLabel(
+            quality_section,
+            text="Quality",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        quality_label.pack(anchor="w", pady=(0, 10))
+
+        self.batch_quality_buttons_frame = ctk.CTkFrame(
+            quality_section,
+            fg_color="transparent"
+        )
+        self.batch_quality_buttons_frame.pack(fill="x")
+
+        if not hasattr(self, "batch_quality_var"):
+            self.batch_quality_var = tk.StringVar(value="best")
+
+        batch_qualities = [
+            ("Best", "best"),
+            ("1080p", "1080p"),
+            ("720p", "720p"),
+            ("480p", "480p"),
+            ("Audio", "audio")
+        ]
+
+        for label, value in batch_qualities:
+            btn = ctk.CTkRadioButton(
+                self.batch_quality_buttons_frame,
+                text=label,
+                variable=self.batch_quality_var,
+                value=value,
+                font=Theme.FONT_BODY,
+                fg_color=Theme.ACCENT_PRIMARY,
+                hover_color=Theme.HOVER,
+                border_color=Theme.BORDER,
+                text_color=Theme.TEXT_PRIMARY
+            )
+            btn.pack(side="left", padx=10, pady=5)
         
         # Batch controls
         batch_btn = ctk.CTkButton(
@@ -2479,7 +2506,7 @@ class UltimateDownloaderModern(ctk.CTk):
         
         self.log(f"📋 Starting batch download: {len(urls)} videos")
         
-        quality = self.quality_var.get()
+        quality = self.batch_quality_var.get() if hasattr(self, "batch_quality_var") else self.quality_var.get()
         output_path = self.path_entry.get().strip() or str(Path.home() / "Downloads")
         
         def batch_thread():
