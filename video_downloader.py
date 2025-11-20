@@ -14,6 +14,19 @@ import pyperclip
 import time
 import sqlite3
 import re
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE-GRADE UPGRADE IMPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
+from config import ConfigManager
+from logger import LoggerFactory, monitor_performance
+from error_handling import (
+    ErrorHandler, retry_on_error, CircuitBreaker,
+    NetworkError, RateLimitError, ValidationError, FileSystemError
+)
+from performance import DownloadQueue, memoize, MemoryCache
+from security import SecurityValidator
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # UPDATE LOGIC MOVED TO MAIN ENTRY POINT (see bottom of file)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -23,6 +36,17 @@ try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 except Exception:
     sync_playwright = None  # Will lazy-install if missing
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GREENLET THREADING COMPATIBILITY FIX
+# ═══════════════════════════════════════════════════════════════════════════════
+import warnings
+import asyncio
+import logging
+
+# Suppress greenlet threading warnings - Playwright handles these internally
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*greenlet.*')
+logging.getLogger('asyncio').setLevel(logging.ERROR)
 
 # Configure
 ctk.set_appearance_mode("dark")
@@ -92,46 +116,72 @@ class Theme:
 
 class BrowserCaptureEngine:
     """
-    Enterprise-Grade Video Stream Capture Engine
-    Captures ONLY video streams (HLS, DASH, MP4, WebM) from browser network traffic.
-    Filters out non-video assets aggressively for precision.
+    FIXED: Enterprise-Grade Video Stream Capture Engine
+    Now captures ALL video types properly!
     """
 
-    # Video-specific regex patterns
+    # ENHANCED: More comprehensive patterns
     VIDEO_URL_PATTERNS = [
-        r'\.m3u8(?:[?#].*)?$',      # HLS manifests
-        r'\.mpd(?:[?#].*)?$',       # DASH manifests
-        r'\.mp4(?:[?#].*)?$',       # MP4 videos
-        r'\.webm(?:[?#].*)?$',      # WebM videos
-        r'\.ts(?:[?#].*)?$',        # MPEG-TS segments
-        r'/video/[^\s]*',           # /video/ paths
-        r'/stream/[^\s]*',          # /stream/ paths
-        r'/hls/[^\s]*',             # HLS paths
-        r'/dash/[^\s]*',            # DASH paths
-        r'\.m4v(?:[?#].*)?$',       # M4V
-        r'\.m4s(?:[?#].*)?$',       # Segments
+        # HLS (most common streaming)
+        r'\.m3u8',
+        r'/hls/',
+        r'master\.m3u8',
+        r'playlist\.m3u8',
+        r'index\.m3u8',
+
+        # DASH
+        r'\.mpd',
+        r'/dash/',
+        r'manifest\.mpd',
+
+        # Direct video files
+        r'\.mp4',
+        r'\.webm',
+        r'\.m4v',
+        r'\.mov',
+        r'\.avi',
+        r'\.mkv',
+        r'\.flv',
+        r'\.ts',
+        r'\.m4s',
+
+        # Common paths
+        r'/video',
+        r'/stream',
+        r'/media',
+        r'/content',
+        r'/player',
+        r'/live',
     ]
 
-    # Valid video content types
     VIDEO_CONTENT_TYPES = [
-        'video/mp4', 'video/webm', 'video/x-m4v', 'video/ogg', 'video/x-msvideo',
-        'application/x-mpegurl', 'application/vnd.apple.mpegurl',  # HLS
-        'application/dash+xml',  # DASH
-        'video/mpeg', 'video/quicktime', 'video/x-flv',
+        'video/mp4',
+        'video/webm',
+        'video/x-m4v',
+        'video/ogg',
+        'video/x-msvideo',
+        'application/x-mpegurl',
+        'application/vnd.apple.mpegurl',
+        'application/dash+xml',
+        'video/mp2t',
+        'video/mpeg',
+        'video/quicktime',
+        'video/x-flv',
     ]
 
-    # Exclude patterns (non-video assets)
+    # FIXED: Less restrictive exclude patterns
     EXCLUDE_PATTERNS = [
-        r'\.(jpg|jpeg|png|gif|webp|svg|ico)$',  # Images
-        r'\.(js|css|woff|ttf|eot|json|xml)$',   # Scripts, styles, fonts
-        r'/api/', r'/ads/', r'/analytics/',    # API calls
-        r'blob:',                               # Blob URLs handled separately
-        r'/thumbnail/', r'/poster/',
+        r'\.(jpg|jpeg|png|gif|webp|svg|ico)$',  # Images only
+        r'\.(js|css|woff|ttf|eot)$',  # Assets only
+        r'/ad[s]?/',  # Ads
+        r'/analytics/',  # Analytics
+        r'/thumbnail',  # Thumbnails
+        r'/poster',  # Posters
     ]
 
     def __init__(self, log_fn, on_found):
         self.log = log_fn
-        self.on_video_found = on_found  # keep compatibility with existing call sites
+        self.on_video_found = on_found
         self._stop = False
         self._stopping = False
         self._is_running = False
@@ -139,73 +189,226 @@ class BrowserCaptureEngine:
         self.context = None
         self.page = None
         self._pw = None
-        self.captured_videos = set()    # Only videos
-        self._request_interceptor = None
-        self._response_handler = None
-        self._video_elements = set()    # Track extracted video srcs
+
+        self.captured_videos = set()
+        self._video_elements = set()
+
+        # NEW: Tracking
+        self.response_count = 0
+        self.video_check_count = 0
 
     def _is_video_url(self, url: str, content_type: str, headers: dict) -> bool:
-        """Strict video validation using multiple criteria."""
-        url_lower = (url or "").lower()
+        """
+        FIXED: Much more lenient video URL detection.
+        """
+        if not url:
+            return False
 
-        # Exclude non-video first
-        for exclude in self.EXCLUDE_PATTERNS:
-            if re.search(exclude, url_lower):
+        url_lower = url.lower()
+
+        # FIRST: Check exclude patterns (must be strict)
+        for pattern in self.EXCLUDE_PATTERNS:
+            if re.search(pattern, url_lower):
                 return False
 
-        # Check URL patterns
-        if any(re.search(pattern, url_lower) for pattern in self.VIDEO_URL_PATTERNS):
-            return True
+        # SECOND: Check content type (if available)
+        if content_type:
+            for vtype in self.VIDEO_CONTENT_TYPES:
+                if vtype in content_type.lower():
+                    self.log(f"✅ Video detected by content-type: {content_type}")
+                    return True
 
-        # Check content type
-        if any(vt in (content_type or "").lower() for vt in self.VIDEO_CONTENT_TYPES):
-            return True
-
-        # Check for range requests (common in video streaming)
-        if (headers.get('range') or '').startswith('bytes='):
-            return True
-
-        # Size check: Video files are typically >1MB
-        try:
-            content_length = int(headers.get('content-length', '0'))
-            if content_length > 1_000_000:
+        # THIRD: Check URL patterns (be generous)
+        for pattern in self.VIDEO_URL_PATTERNS:
+            if re.search(pattern, url_lower):
+                self.log(f"✅ Video detected by URL pattern: {pattern}")
                 return True
-        except Exception:
-            pass
+
+        # FOURTH: Check for range requests (video streams often use these)
+        if headers:
+            range_header = headers.get('range', '').lower()
+            if 'bytes' in range_header:
+                self.log(f"✅ Video detected by range request")
+                return True
+
+        # FIFTH: Check content length (LOWERED threshold)
+        if headers:
+            try:
+                content_length = int(headers.get('content-length', 0))
+                # FIXED: Lower threshold to 100KB instead of 1MB
+                if content_length > 100000:  # 100KB
+                    # Also check if URL looks video-like
+                    if any(hint in url_lower for hint in ['video', 'stream', 'media', 'mp4', 'webm', 'm3u8']):
+                        self.log(f"✅ Video detected by size + URL hint: {content_length} bytes")
+                        return True
+            except:
+                pass
 
         return False
+
+    def extract_title_from_page(self):
+        """Extract title from multiple sources with priority."""
+        try:
+            # Try video title attribute
+            video_title = self.page.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    return video ? video.title || video.getAttribute('data-title') : null;
+                }
+            """)
+            if video_title:
+                self.log(f"📌 Video title: {video_title}")
+                return video_title.strip()
+
+            # Try Open Graph title
+            og_title = self.page.evaluate("""
+                () => {
+                    const og = document.querySelector('meta[property="og:title"]');
+                    return og ? og.content : null;
+                }
+            """)
+            if og_title:
+                return og_title.strip()
+
+            # Try page title
+            page_title = self.page.title()
+            if page_title:
+                return page_title.strip()
+
+            # Fallback to URL
+            from urllib.parse import urlparse
+            domain = urlparse(self.page.url).netloc.replace('www.', '')
+            return f"Video from {domain}"
+
+        except Exception as e:
+            self.log(f"Title extraction error: {e}")
+            return "Video"
 
     def _extract_video_sources(self):
         """Extract video sources from <video> elements on the page."""
         try:
             videos = self.page.query_selector_all('video')
+            current_title = self.extract_title_from_page()
+
+            videos = self.page.query_selector_all('video')
+
             for video in videos:
                 src = video.get_attribute('src')
+
                 if src and src not in self._video_elements:
                     self._video_elements.add(src)
+
                     if self._is_video_url(src, '', {}):
-                        self.log(f"📹 Extracted from <video> tag: {src[:80]}...")
+                        # Get video-specific title or use page title
+                        video_title = (video.get_attribute('title') or 
+                                     video.get_attribute('data-title') or 
+                                     current_title)
+
+                        self.log(f"📹 Extracted: {video_title[:50]}")
+
                         if src not in self.captured_videos:
                             self.captured_videos.add(src)
-                            title = self.page.title() or ""
-                            current_url = self.page.url
-                            self.on_video_found(src, title, current_url)
+                            page_url = self.page.url
+                            self.on_video_found(src, video_title, page_url)
 
-                # Check <source> children
+                # Check source children
                 sources = video.query_selector_all('source')
                 for source in sources:
                     src = source.get_attribute('src')
                     if src and src not in self._video_elements:
                         self._video_elements.add(src)
+
                         if self._is_video_url(src, '', {}):
-                            self.log(f"📹 Extracted from <source> tag: {src[:80]}...")
+                            source_title = (source.get_attribute('title') or 
+                                          current_title)
+
                             if src not in self.captured_videos:
                                 self.captured_videos.add(src)
-                                title = self.page.title() or ""
-                                current_url = self.page.url
-                                self.on_video_found(src, title, current_url)
+                                self.on_video_found(src, source_title, self.page.url)
+
         except Exception as e:
-            self.log(f"⚠️ Video element extraction failed: {e}")
+            self.log(f"Video extraction error: {e}")
+
+    def detect_video_quality(self, url):
+        """Detect video quality from URL."""
+        import re
+
+        url_lower = url.lower()
+        resolution = 'Unknown'
+        format_type = 'Unknown'
+
+        # Look for resolution in URL
+        res_match = re.search(r'(\d{3,4})p', url)
+        if res_match:
+            resolution = f"{res_match.group(1)}p"
+
+        # Look for dimensions
+        dim_match = re.search(r'(\d{3,4})x(\d{3,4})', url)
+        if dim_match:
+            resolution = dim_match.group(0)
+
+        # Detect format
+        if '.m3u8' in url_lower:
+            format_type = 'HLS'
+        elif '.mpd' in url_lower:
+            format_type = 'DASH'
+        elif '1080' in url_lower and resolution == 'Unknown':
+            resolution = '1080p'
+        elif '720' in url_lower and resolution == 'Unknown':
+            resolution = '720p'
+        elif '480' in url_lower and resolution == 'Unknown':
+            resolution = '480p'
+
+        return {'resolution': resolution, 'format': format_type, 'quality': resolution if resolution != 'Unknown' else format_type}
+
+    def parse_hls_manifest(self, manifest_url):
+        """
+        Parse HLS manifest to extract quality variants.
+
+        Returns: list of variant streams with quality info
+        """
+        try:
+            import requests
+            response = requests.get(manifest_url, timeout=10)
+            content = response.text
+
+            variants = []
+            lines = content.split('\n')
+
+            current_variant = {}
+            for i, line in enumerate(lines):
+                line = line.strip()
+
+                if line.startswith('#EXT-X-STREAM-INF:'):
+                    # Parse stream info
+                    import re
+
+                    bandwidth_match = re.search(r'BANDWIDTH=(\d+)', line)
+                    resolution_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
+                    codecs_match = re.search(r'CODECS="([^"]+)"', line)
+
+                    current_variant = {
+                        'bandwidth': int(bandwidth_match.group(1)) if bandwidth_match else None,
+                        'resolution': resolution_match.group(1) if resolution_match else None,
+                        'codecs': codecs_match.group(1) if codecs_match else None,
+                    }
+
+                    # Next line should be the URL
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        if next_line and not next_line.startswith('#'):
+                            current_variant['url'] = next_line
+                            variants.append(current_variant)
+                            current_variant = {}
+
+            # Sort by quality (highest first)
+            variants.sort(key=lambda x: x.get('bandwidth', 0), reverse=True)
+
+            return variants
+
+        except Exception as e:
+            self.log(f"HLS manifest parsing error: {e}")
+            return []
 
     def _setup_blob_monitor(self):
         """Monitor Blob and MediaSource creation for blob: URLs."""
@@ -399,18 +602,69 @@ class BrowserCaptureEngine:
                     headers = dict(response.headers or {})
                     content_type = headers.get('content-type', '') or ''
 
-                    if self._is_video_url(url, content_type, headers):
+                    is_video = self._is_video_url(url, content_type, headers)
+                    
+                    # hard gate: only real video / streaming types
+                    ctype = (content_type or "").lower()
+                    is_real_video = (
+                        ctype.startswith("video/") or
+                        "application/x-mpegurl" in ctype or
+                        "application/vnd.apple.mpegurl" in ctype or
+                        "application/dash+xml" in ctype
+                    )
+
+                    if is_video and is_real_video:
+                        # STRICT deduplication - only process if truly new
                         if url not in self.captured_videos:
                             self.captured_videos.add(url)
-                            title = (self.page.title() or "")[:100] or "Untitled Video"
+                            self.log(f"📊 New video detected ({len(self.captured_videos)} total)")
+                            
+                            try:
+                                # Enhanced title extraction
+                                title = self.extract_title_from_page()
+                            except Exception as title_err:
+                                title = "Video"
+                                self.log(f"⚠️ Title extraction failed: {title_err}")
+                            
+                            # Detect quality from response
+                            try:
+                                quality_info = self.detect_video_quality(url)
+                            except Exception as quality_err:
+                                quality_info = {'resolution': 'Unknown', 'format': 'Unknown'}
+                                self.log(f"⚠️ Quality detection failed: {quality_err}")
+                            
                             page_url = self.page.url
-                            self.log(f"🎬 CAPTURED VIDEO STREAM:\nURL: {url}\nType: {content_type}\nSize: {headers.get('content-length', 'Unknown')} bytes")
-                            self.on_video_found(url, title, page_url)
+                            content_length = headers.get('content-length', 'Unknown')
+                            
+                            # Enhanced logging with quality info
+                            self.log(f"🎬 CAPTURED VIDEO STREAM:")
+                            self.log(f"   Title: {title[:60]}")
+                            self.log(f"   URL: {url[:80]}")
+                            self.log(f"   Type: {content_type}")
+                            self.log(f"   Size: {content_length} bytes")
+                            if quality_info and isinstance(quality_info, dict):
+                                if quality_info.get('resolution') and quality_info.get('resolution') != 'Unknown':
+                                    self.log(f"   Quality: {quality_info['resolution']}")
+                            
+                            # Thread-safe callback
+                            try:
+                                self.log(f"🔗 Calling on_video_found callback with URL: {url[:60]}...")
+                                self.on_video_found(url, title, page_url)
+                                self.log(f"✅ Callback successful - URL should appear in entry field")
+                            except Exception as callback_err:
+                                import traceback
+                                self.log(f"⚠️ Callback error: {callback_err}")
+                                self.log(f"⚠️ Callback traceback: {traceback.format_exc()[:300]}")
 
                     if len(self.captured_videos) == 0:
-                        self._extract_video_sources()
+                        try:
+                            self._extract_video_sources()
+                        except Exception as extract_err:
+                            self.log(f"⚠️ Video extraction error: {extract_err}")
                 except Exception as e:
+                    import traceback
                     self.log(f"⚠️ Response handler error: {e}")
+                    self.log(f"⚠️ Traceback: {traceback.format_exc()[:200]}")
 
             self._response_handler = response_handler
             self.page.on('response', response_handler)
@@ -719,6 +973,112 @@ class DatabaseManager:
             pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# NEW: DOWNLOAD QUEUE MANAGER SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DownloadItem:
+    """Represents a single download with progress tracking"""
+    def __init__(self, download_id, url, title, quality, output_path):
+        self.id = download_id
+        self.url = url
+        self.title = title or "Untitled"
+        self.quality = quality
+        self.output_path = output_path
+        self.status = "queued"  # queued, downloading, processing, completed, failed, cancelled
+        self.progress = 0.0
+        self.downloaded_bytes = 0
+        self.total_bytes = 0
+        self.speed = 0
+        self.eta = 0
+        self.error_message = ""
+        self.file_path = ""
+        self.start_time = None
+        self.end_time = None
+        self.thread = None
+        self.thumbnail = None
+
+    def update_progress(self, data: dict):
+        """Update download progress from normalized callback data"""
+        # status: 'downloading', 'processing', 'finished'
+        status = data.get("status")
+        if status:
+            if status == "finished":
+                self.status = "completed"
+                self.progress = 100.0
+            else:
+                self.status = status
+
+        # numeric fields
+        if "percent" in data and data["percent"] is not None:
+            self.progress = float(data["percent"])
+
+        if "downloaded" in data and data["downloaded"] is not None:
+            self.downloaded_bytes = int(data["downloaded"])
+
+        if "total" in data and data["total"] is not None:
+            self.total_bytes = int(data["total"])
+
+        if "speed" in data and data["speed"] is not None:
+            self.speed = float(data["speed"])
+
+        if "eta" in data and data["eta"] is not None:
+            self.eta = int(data["eta"])
+
+class ActiveDownloadsManager:
+    """Manages multiple simultaneous downloads"""
+    def __init__(self):
+        self.downloads = {}  # download_id -> DownloadItem
+        self.next_id = 1
+        self.lock = threading.Lock()
+
+    def add_download(self, url, title, quality, output_path):
+        """Add a new download to the queue"""
+        with self.lock:
+            download_id = self.next_id
+            self.next_id += 1
+            item = DownloadItem(download_id, url, title, quality, output_path)
+            self.downloads[download_id] = item
+            return download_id
+
+    def get_download(self, download_id):
+        """Get download by ID"""
+        with self.lock:
+            return self.downloads.get(download_id)
+
+    def get_all_active(self):
+        """Get all active (not completed/failed) downloads"""
+        with self.lock:
+            return [d for d in self.downloads.values() 
+                    if d.status in ['queued', 'downloading', 'processing']]
+
+    def get_all_completed(self):
+        """Get all completed downloads from manager cache"""
+        with self.lock:
+            return [d for d in self.downloads.values() 
+                    if d.status in ['completed', 'failed', 'cancelled']]
+
+    def remove_download(self, download_id):
+        """Remove download from manager"""
+        with self.lock:
+            if download_id in self.downloads:
+                # Cancel thread if still running
+                item = self.downloads[download_id]
+                if item.thread and item.thread.is_alive():
+                    # Set cancellation flag
+                    item.status = "cancelled"
+                del self.downloads[download_id]
+
+    def update_status(self, download_id, status, error_message="", file_path=""):
+        """Update download status"""
+        with self.lock:
+            if download_id in self.downloads:
+                self.downloads[download_id].status = status
+                if error_message:
+                    self.downloads[download_id].error_message = error_message
+                if file_path:
+                    self.downloads[download_id].file_path = file_path
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # DOWNLOAD MANAGER (NO CHANGES)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -757,51 +1117,96 @@ class _YDLLogger:
                 pass
 
 class DownloadManager:
-    """Enhanced download manager"""
+    """Enhanced download manager with enterprise features"""
     
-    def __init__(self, progress_callback=None, log_callback=None):
+    def __init__(self, progress_callback=None, log_callback=None, config=None, logger=None, security=None, error_handler=None):
         self.progress_callback = progress_callback
         self.log_callback = log_callback
+        self.config = config
+        self.logger = logger
+        self.security = security
+        self.error_handler = error_handler
         self.is_cancelled = False
         self.start_time = None
     
     def log(self, msg):
         if self.log_callback:
             self.log_callback(msg)
-    
+
+    def extract_title_from_info(self, info):
+        """
+        Extract best possible title from yt-dlp info dict.
+
+        Priority:
+        1. info['title'] - Primary title
+        2. info['alt_title'] - Alternative title
+        3. info['track'] - Music track name
+        4. info['fulltitle'] - Full title
+        5. info['webpage_url_basename'] - URL based
+        6. Fallback to 'video'
+        """
+        if not isinstance(info, dict):
+            return 'video'
+
+        # Try various title fields in priority order
+        title = (info.get('title') or 
+                info.get('alt_title') or 
+                info.get('track') or 
+                info.get('fulltitle') or 
+                info.get('webpage_url_basename') or 
+                'video')
+
+        return str(title).strip()
+
+    def build_output_template(self, output_path, title, quality, is_audio=False):
+        """
+        Build yt-dlp output template with proper filename.
+
+        Returns: Complete path with template
+        """
+        import os
+
+        # Sanitize title
+        safe_title = self._sanitize_title(title)
+
+        # Add quality suffix if not audio
+        if not is_audio and quality and quality != 'best':
+            safe_title = f"{safe_title}_{quality}"
+
+        # Extension
+        ext = '.mp3' if is_audio else '.mp4'
+
+        # Full template
+        template = os.path.join(output_path, f"{safe_title}{ext}")
+
+        return template
+
     def _format_for_quality(self, quality: str) -> str:
         """
         Map GUI quality selection to yt-dlp format string.
-        Ensures exact quality matching for user selection.
+        Priority: exact match -> downgrade -> upgrade if nothing below exists
         """
         if not quality or quality == "best":
-            # Best available video + best available audio
             return "bv*+ba/best"
         
         if quality == "audio":
-            # Best audio only
             return "bestaudio/best"
         
-        # Handle specific quality selection (e.g., "720p", "1080p", "144p")
         if quality.endswith("p"):
             try:
-                height = int(quality[:-1])  # Remove 'p' and convert to int
-                
-                # Format string breakdown:
+                height = int(quality[:-1])
+                # Priority chain:
                 # 1. Try exact height with best audio
-                # 2. Try height within ±10% tolerance with best audio
-                # 3. Fallback to best video near that height
-                # 4. Final fallback to best available
-                
-                # For better quality matching, especially for lower resolutions like 144p
-                return f"bv*[height={height}]+ba/bv*[height<={int(height*1.1)}][height>={int(height*0.9)}]+ba/b[height<={int(height*1.1)}]/best"
-                
+                # 2. Try within ±10% tolerance with best audio
+                # 3. Try anything at or below requested height
+                # 4. If nothing below exists, fallback to best (upgrade)
+                return f"bv*[height={height}]+ba/bv*[height<={int(height*1.1)}][height>={int(height*0.9)}]+ba/bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/best"
             except (ValueError, IndexError):
                 self.log(f"Invalid quality format: {quality}, using best")
                 return "bv*+ba/best"
         
-        # Default fallback
         return "bv*+ba/best"
+
 
     # ✅ Allow UI to cancel an in-flight download
     def cancel(self):
@@ -810,44 +1215,112 @@ class DownloadManager:
         self.log("🛑 Download cancelled by user")
     
     def progress_hook(self, d):
+        """
+        Process yt-dlp progress data.
+        FIXED: Properly calculates percent even when total_bytes is missing by using _percent_str fallback
+        """
         if self.is_cancelled:
             raise Exception("Download cancelled by user")
-        
-        if d['status'] == 'downloading':
+
+        status = d.get("status")
+        if status == "downloading":
             try:
-                downloaded = d.get('downloaded_bytes', 0)
-                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-                speed = d.get('speed', 0)
-                eta = d.get('eta', 0)
-                
-                percent = (downloaded / total * 100) if total > 0 else 0
-                
+                downloaded = d.get("downloaded_bytes") or 0
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                speed = d.get("speed") or 0
+                eta = d.get("eta") or 0
+
+                # 🔴 CRITICAL FIX: Calculate percent with fallback to _percent_str
+                percent = 0.0
+                if total > 0:
+                    percent = (downloaded / total * 100.0)
+                else:
+                    # Fallback: Parse yt-dlp's pre-calculated string (e.g. " 15.4%")
+                    pct_str = d.get("_percent_str", "0%").strip().replace("%", "").strip()
+                    try:
+                        percent = float(pct_str)
+                    except (ValueError, AttributeError, TypeError):
+                        percent = 0.0
+
+                # DEBUG: Log when progress_hook is called
+                if int(percent) % 10 == 0 and percent > 0:
+                    print(f"[PROGRESS_HOOK] Raw: percent={percent:.1f}% speed={speed} eta={eta} | Has callback: {self.progress_callback is not None}")
+
                 if self.progress_callback:
                     self.progress_callback({
-                        'status': 'downloading',
-                        'percent': percent,
-                        'downloaded': downloaded,
-                        'total': total,
-                        'speed': speed,
-                        'eta': eta
+                        "status": "downloading",
+                        "percent": percent,
+                        "downloaded": downloaded,
+                        "total": total,
+                        "speed": speed,
+                        "eta": eta,
                     })
-            except:
-                pass
-        elif d['status'] == 'finished':
+            except Exception as e:
+                print(f"[progress_hook error] {e}")
+
+        elif status == "finished":
             if self.progress_callback:
-                self.progress_callback({'status': 'processing', 'percent': 98})
+                self.progress_callback({
+                    "status": "finished",
+                    "percent": 100.0,
+                    "downloaded": d.get("downloaded_bytes") or 0,
+                    "total": d.get("total_bytes") or d.get("total_bytes_estimate") or 0,
+                    "speed": d.get("speed") or 0,
+                    "eta": 0,
+                })
     
     def download(self, url, quality="best", output_path=None, preferred_title=None, referer=None):
-        """Download to fixed .mp4/.mp3 with robust cancellation.
-        For .php/.asp gateways, use direct HTTP; otherwise yt-dlp."""
+        """Download video. Handles both yt-dlp URLs and captured stream URLs (blob:// or direct streams)."""
         self.is_cancelled = False
         self.start_time = time.time()
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ENTERPRISE: URL VALIDATION & SECURITY CHECK
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.security:
+            is_valid, error_msg = self.security.validate_url(url)
+            if not is_valid:
+                self.log(f"🚫 Security check failed: {error_msg}")
+                if self.logger:
+                    self.logger.error(f"URL validation failed: {error_msg}", url=url)
+                return {"success": False, "error": f"Invalid URL: {error_msg}"}
+        
+        # Log download start with enterprise logging
+        if self.logger:
+            self.logger.download_started(url, quality=quality)
+        
         if not output_path:
             output_path = str(Path.home() / "Downloads")
         is_audio = (quality == "audio")
+        
+        # DETECT CAPTURED STREAM URLs (from browser capture)
+        is_captured_stream = any(marker in url.lower() for marker in 
+                                 ['blob:', 'data:', 'dua.', 'stream', '/get_file/', '.m3u8', '.mpd'])
+        
+        if is_captured_stream:
+            # Use binary download for captured streams
+            self.log(f"🎬 Detected captured stream URL - using binary download")
+            downloaded_file = self._binary_download(url, output_path, preferred_title)
+            if downloaded_file and os.path.exists(downloaded_file):
+                size_bytes = os.path.getsize(downloaded_file)
+                elapsed = max(1, int(time.time() - self.start_time))
+                avg_speed = size_bytes / elapsed if size_bytes else 0
+                return {
+                    "success": True,
+                    "info": {"title": preferred_title or "captured_video"},
+                    "filesize": size_bytes,
+                    "duration": 0,
+                    "completion_time": elapsed,
+                    "average_speed": avg_speed,
+                    "final_path": downloaded_file
+                }
+            else:
+                return {"success": False, "error": "Binary download failed"}
+        
         # Early cancellation guard
         if self.is_cancelled:
             return {"success": False, "error": "Download cancelled"}
+        
         # Early detection: if URL has gateway extensions (.php, .asp, etc), skip yt-dlp entirely
         gateway_extensions = ['.php', '.asp', '.aspx', '.jsp', '.cgi']
         is_gateway = any(ext in url.lower() for ext in gateway_extensions)
@@ -878,7 +1351,6 @@ class DownloadManager:
                 "average_speed": avg_speed,
                 "final_path": downloaded_file
             }
-        # Normal yt-dlp path for non-gateway URLs
         ydl_opts = self._build_ydl_opts(url, quality, output_path, is_audio=is_audio,
                                         preferred_title=preferred_title, referer=referer)
         info = {}
@@ -930,8 +1402,15 @@ class DownloadManager:
             emsg = str(e)
             if self.is_cancelled or "cancel" in emsg.lower():
                 self.log("🛑 Download cancelled")
+                if self.logger:
+                    self.logger.download_failed(url, "User cancelled")
                 return {"success": False, "error": "Download cancelled by user"}
             self.log(f"❌ yt-dlp failed: {emsg[:200]}")
+            # Enterprise error handling
+            if self.error_handler:
+                self.error_handler.handle_error(e, {'url': url, 'quality': quality})
+            if self.logger:
+                self.logger.download_failed(url, emsg, context={'quality': quality})
             return {"success": False, "error": emsg}
         # Finalize (rename to .mp4/.mp3 if needed)
         try:
@@ -950,6 +1429,20 @@ class DownloadManager:
             self.log("⚠️ File not found after download")
         elapsed = max(1, int(time.time() - self.start_time))
         avg_speed = size_bytes / elapsed if size_bytes else 0
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ENTERPRISE: LOG DOWNLOAD COMPLETION
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.logger and size_bytes:
+            self.logger.download_completed(
+                url,
+                downloaded_file,
+                size_bytes,
+                elapsed,
+                quality=quality,
+                is_audio=is_audio
+            )
+        
         return {
             "success": bool(size_bytes),
             "info": info,
@@ -1077,6 +1570,114 @@ class DownloadManager:
                     }
             return {"success": False, "error": msg}
     
+    def _binary_download(self, url, output_path, preferred_title=None):
+        """Download video as binary blob (for captured stream URLs)."""
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+            
+            # Resilient session with retries
+            session = requests.Session()
+            retry = Retry(connect=3, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+            adapter = HTTPAdapter(max_retries=retry)
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+            
+            # Headers to avoid blocks
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': url.split('?')[0] if '?' in url else url,
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate'
+            }
+            
+            self.log(f"📥 Starting binary download: {url[:60]}...")
+            response = session.get(url, headers=headers, stream=True, timeout=30, verify=False)
+            response.raise_for_status()
+            
+            # Get content length
+            total_size = int(response.headers.get('content-length', 0))
+            if total_size:
+                self.log(f"📦 Content size: {total_size/1024/1024:.1f} MB")
+            
+            # Detect extension from content-type or URL
+            content_type = response.headers.get('content-type', '').lower()
+            ext = '.mp4'
+            if 'audio' in content_type or 'mp3' in content_type:
+                ext = '.mp3'
+            elif 'video' in content_type or 'mp4' in content_type:
+                ext = '.mp4'
+            elif 'webm' in content_type:
+                ext = '.webm'
+            elif '.m3u8' in url.lower():
+                ext = '.m3u8'
+            elif '.mpd' in url.lower():
+                ext = '.mpd'
+            
+            # Generate filename
+            title = self._sanitize_title(preferred_title or 'captured_video')
+            filename = f"{title}{ext}"
+            filepath = os.path.join(output_path, filename)
+            
+            # Avoid overwrite
+            counter = 1
+            base_name = f"{title}_"
+            while os.path.exists(filepath):
+                filepath = os.path.join(output_path, f"{base_name}{counter}{ext}")
+                counter += 1
+            
+            # Download with progress
+            downloaded = 0
+            start_time = time.time()
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if self.is_cancelled:
+                        os.remove(filepath)
+                        return None
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size:
+                            pct = (downloaded / total_size) * 100
+                            elapsed_so_far = time.time() - start_time
+                            speed = downloaded / elapsed_so_far if elapsed_so_far > 0 else 0
+                            eta = (total_size - downloaded) / speed if speed > 0 else 0
+                            
+                            # Update progress bar via callback
+                            if self.progress_callback:
+                                self.progress_callback({
+                                    'status': 'downloading',
+                                    'percent': pct,
+                                    'downloaded': downloaded,
+                                    'total': total_size,
+                                    'speed': speed,
+                                    'eta': eta
+                                })
+                            
+                            self.log(f"⬇️ {pct:.0f}% ({downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB) | Speed: {speed/1024/1024:.1f}MB/s")
+            
+            elapsed = time.time() - start_time
+            file_size = os.path.getsize(filepath)
+            
+            # Final progress update
+            if self.progress_callback:
+                self.progress_callback({
+                    'status': 'finished',
+                    'percent': 100,
+                    'downloaded': file_size,
+                    'total': file_size,
+                    'speed': file_size / elapsed if elapsed > 0 else 0,
+                    'eta': 0
+                })
+            
+            self.log(f"✅ Binary download complete: {os.path.basename(filepath)} ({file_size/1024/1024:.1f} MB in {elapsed:.0f}s)")
+            
+            return filepath
+            
+        except Exception as e:
+            self.log(f"❌ Binary download failed: {e}")
+            return None
     
     def _http_download_fallback(self, url: str, dest_path: str, referer: str | None = None) -> str:
         """Stream the file directly when yt-dlp refuses 'unsafe' extension."""
@@ -1102,6 +1703,7 @@ class DownloadManager:
                 
                 tmp = dest_path + ".part"
                 downloaded = 0
+                start_time = time.time()
                 
                 with open(tmp, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
@@ -1121,21 +1723,30 @@ class DownloadManager:
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
-                            # Update progress bar
+                            
+                            # Update progress bar with speed and ETA
                             if self.progress_callback and total_size > 0:
                                 percent = (downloaded / total_size) * 100
-                                speed = 0  # We could calculate this if needed
+                                elapsed_so_far = time.time() - start_time
+                                speed = downloaded / elapsed_so_far if elapsed_so_far > 0 else 0
+                                eta = (total_size - downloaded) / speed if speed > 0 else 0
+                                
                                 self.progress_callback({
                                     "status": "downloading",
                                     "percent": percent,
                                     "downloaded": downloaded,
                                     "total": total_size,
                                     "speed": speed,
-                                    "eta": 0
+                                    "eta": eta
                                 })
+                            
                             # Log every 10MB
                             if downloaded % (10 * 1024 * 1024) < (1024 * 1024):
-                                self.log(f"📥 Downloaded {downloaded / (1024 * 1024):.1f} MB...")
+                                if total_size > 0:
+                                    pct = (downloaded / total_size) * 100
+                                    self.log(f"📥 {pct:.0f}% - Downloaded {downloaded / (1024 * 1024):.1f} MB / {total_size / (1024 * 1024):.1f} MB")
+                                else:
+                                    self.log(f"📥 Downloaded {downloaded / (1024 * 1024):.1f} MB...")
                 
                 # Atomically move into place
                 if os.path.exists(dest_path):
@@ -1146,11 +1757,19 @@ class DownloadManager:
                 os.replace(tmp, dest_path)
                 
                 # Final progress update
+                final_elapsed = time.time() - start_time
+                final_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
                 if self.progress_callback:
                     self.progress_callback({
                         "status": "finished",
-                        "percent": 100
+                        "percent": 100,
+                        "downloaded": final_size,
+                        "total": final_size,
+                        "speed": final_size / final_elapsed if final_elapsed > 0 else 0,
+                        "eta": 0
                     })
+                
+                self.log(f"✅ HTTP download complete: {final_size / (1024 * 1024):.1f} MB in {final_elapsed:.0f}s")
 
             return dest_path if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0 else ""
         except Exception as e:
@@ -1171,16 +1790,7 @@ class DownloadManager:
         # Use site's title as filename; yt-dlp will trim via trim_file_name
         return os.path.join(outputpath, "%(title)s.%(ext)s")
 
-    def _get_format_string(self, quality):
-        """Get format string"""
-        if quality == "audio":
-            return 'bestaudio/best'
-        elif quality == "best":
-            return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
-        else:
-            height = quality.replace('p', '')
-            return f'bestvideo[height<={height}][ext=mp4]+bestaudio/bestvideo[height<={height}]+bestaudio/best'
-    
+
     def _fallback_title_from_url(self, url: str) -> str:
         """Derive a reasonable filename stem from a direct media URL."""
         try:
@@ -1200,27 +1810,42 @@ class DownloadManager:
             return "video"
 
     def _sanitize_title(self, name: str) -> str:
-        """Sanitize title for Windows-safe filenames and stable FFmpeg processing."""
+        """Enhanced sanitization for cross-platform filenames."""
         if not name:
             return "video"
-        # Remove control characters and collapse whitespace
-        name = "".join(ch for ch in name if ch >= " ")
-        name = " ".join(name.split())
-        # Strip trailing dots/spaces not allowed on Windows
-        name = name.rstrip(" .")
+
+        import re
+
+        # Remove HTML entities
+        name = name.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+
+        # Remove control characters
+        name = ''.join(ch for ch in name if ord(ch) >= 32 or ch in '\t\n\r')
+
         # Replace invalid characters
-        for ch in '<>:"/\\|?*':
-            name = name.replace(ch, "_")
-        # Avoid reserved device names
-        reserved = {
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
-        }
+        invalid_chars = r'[<>:"/\\|?*\x00-\x1f]'
+        name = re.sub(invalid_chars, '_', name)
+
+        # Collapse whitespace
+        name = ' '.join(name.split())
+
+        # Remove trailing dots/spaces
+        name = name.strip(' .')
+
+        # Check reserved names
+        reserved = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 
+                   'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+                   'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 
+                   'LPT7', 'LPT8', 'LPT9'}
+
         if name.upper() in reserved:
-            name = f"{name}_"
-        # Ensure non-empty and limit length
-        return (name or "video")[:150]
+            name = f"_{name}"
+
+        # Limit length
+        if len(name) > 200:
+            name = name[:200].strip(' .')
+
+        return name or 'video'
 
     def _build_ydl_opts(self, url, quality, output_path, is_audio=False, preferred_title=None, referer=None):
         """Build yt-dlp options - optimized to avoid FFmpeg merge errors"""
@@ -1344,37 +1969,37 @@ class DownloadManager:
         except Exception:
             return path
 
-def finalize_media(self, input_path: str, output_dir: str, chosen_title: str, is_audio: bool) -> str:
-    """Simple rename to Title.mp4/mp3 if the server used a gateway suffix (.php, .asp, ...)."""
-    try:
-        if not input_path or not os.path.exists(input_path):
-            return ""
-        cur_dir, cur_name = os.path.dirname(input_path), os.path.basename(input_path)
-        base, ext = os.path.splitext(cur_name)
-        target_ext = ".mp3" if is_audio else ".mp4"
+    def finalize_media(self, input_path: str, output_dir: str, chosen_title: str, is_audio: bool) -> str:
+        """Simple rename to Title.mp4/mp3 if the server used a gateway suffix (.php, .asp, ...)."""
+        try:
+            if not input_path or not os.path.exists(input_path):
+                return ""
+            cur_dir, cur_name = os.path.dirname(input_path), os.path.basename(input_path)
+            base, ext = os.path.splitext(cur_name)
+            target_ext = ".mp3" if is_audio else ".mp4"
 
-        # Already correct
-        if ext.lower() == target_ext:
-            self.log(f"✅ Already correct extension: {cur_name}")
-            return input_path
+            # Already correct
+            if ext.lower() == target_ext:
+                self.log(f"✅ Already correct extension: {cur_name}")
+                return input_path
 
-        chosen_title = self._sanitize_title(chosen_title or base or "video")
-        new_name = f"{chosen_title}{target_ext}"
-        new_path = os.path.join(cur_dir, new_name)
-
-        # Ensure unique
-        i = 1
-        while os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(input_path):
-            new_name = f"{chosen_title} ({i}){target_ext}"
+            chosen_title = self._sanitize_title(chosen_title or base or "video")
+            new_name = f"{chosen_title}{target_ext}"
             new_path = os.path.join(cur_dir, new_name)
-            i += 1
 
-        os.rename(input_path, new_path)
-        self.log(f"✅ Renamed: {cur_name} → {new_name}")
-        return new_path
-    except Exception as e:
-        self.log(f"❌ Rename failed: {e}")
-        return input_path
+            # Ensure unique
+            i = 1
+            while os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(input_path):
+                new_name = f"{chosen_title} ({i}){target_ext}"
+                new_path = os.path.join(cur_dir, new_name)
+                i += 1
+
+            os.rename(input_path, new_path)
+            self.log(f"✅ Renamed: {cur_name} → {new_name}")
+            return new_path
+        except Exception as e:
+            self.log(f"❌ Rename failed: {e}")
+            return input_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1398,18 +2023,60 @@ class UltimateDownloaderModern(ctk.CTk):
         self.download_path = str(Path.home() / "Downloads")
         self._log_buffer = []  # Buffer for early log messages
         
-        # Managers created later
-        self.db = DatabaseManager()
+        # ═══════════════════════════════════════════════════════════════════════════
+        # ENTERPRISE-GRADE INITIALIZATION
+        # ═══════════════════════════════════════════════════════════════════════════
+        
+        # Load enterprise configuration
+        self.config = ConfigManager.get_config()
+        
+        # Setup enterprise logging
+        self.logger = LoggerFactory.get_logger(
+            'downloader',
+            config=self.config.logging.to_dict()
+        )
+        
+        # Setup error handler
+        self.error_handler = ErrorHandler(self.logger)
+        
+        # Setup security validator
+        self.security = SecurityValidator(self.config.security.to_dict())
+        
+        # Setup database manager
+        self.db = DatabaseManager(
+            str(Path.home() / ".ultimate_downloader_v9.db")
+        )
+        
+        # Setup downloads manager for queue-based system
+        self.downloads_manager = ActiveDownloadsManager()
+        
+        # Setup download queue
+        self.download_queue = DownloadQueue(
+            max_concurrent=self.config.download.max_concurrent_downloads
+        )
+        
+        # Setup circuit breaker for network resilience
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,
+            timeout=60
+        )
+        
+        # Setup memory cache
+        self.cache = MemoryCache(
+            max_size=1000,
+            ttl=self.config.performance.cache_ttl
+        )
+        
         self.capture_engine = None
         
         # ✅ FIRST: build the UI (this defines update_progress, creates widgets, etc.)
         self.setup_ui()
         
-        # ✅ THEN: create DownloadManager
-        self.download_manager = DownloadManager(
-            progress_callback=self.update_progress,
-            log_callback=self.log
-        )
+        # ✅ THEN: Per-download DownloadManager instances are created in start_download()
+        # Do NOT create shared download_manager here - each download gets its own
+        
+        # Log startup
+        self.logger.info("🚀 Application started", version=self.config.version, environment=self.config.environment)
         
         # Load stats
         self.load_stats()
@@ -1506,15 +2173,13 @@ class UltimateDownloaderModern(ctk.CTk):
 
 
     def create_content(self):
-        """Create main content area with tabs and shared activity log - WITH SCROLLING"""
-        
-        # Main content frame (container for everything)
+        """Create main content area with new tab structure"""
         content_frame = ctk.CTkFrame(
             self.main_container,
             fg_color="transparent"
         )
         content_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
+
         # ✅ CREATE SCROLLABLE FRAME
         scrollable_frame = ctk.CTkScrollableFrame(
             content_frame,
@@ -1523,15 +2188,15 @@ class UltimateDownloaderModern(ctk.CTk):
             scrollbar_button_hover_color=Theme.HOVER
         )
         scrollable_frame.pack(fill="both", expand=True)
-        
-        # Tabs container inside scrollable frame
+
+        # Tabs container
         tabs_container = ctk.CTkFrame(
             scrollable_frame,
             fg_color="transparent"
         )
         tabs_container.pack(fill="both", expand=False, pady=(0, 10))
-        
-        # Tabview with fixed height
+
+        # NEW TABS STRUCTURE - 3 tabs only
         self.tabview = ctk.CTkTabview(
             tabs_container,
             fg_color=Theme.BG_SECONDARY,
@@ -1542,22 +2207,25 @@ class UltimateDownloaderModern(ctk.CTk):
             segmented_button_unselected_hover_color=Theme.BG_INPUT,
             corner_radius=Theme.RADIUS_LARGE,
             border_width=0,
-            height=500  # Fixed height for tabs
+            height=500
         )
         self.tabview.pack(fill="both", expand=True)
-        
-        # Add tabs
+
+        # Add new tabs
         self.tab_download = self.tabview.add("📥 Download")
-        self.tab_batch = self.tabview.add("📋 Batch")
-        self.tab_history = self.tabview.add("📊 History")
-        
+        self.tab_in_progress = self.tabview.add("⏳ In Progress")
+        self.tab_downloaded = self.tabview.add("✅ Downloaded")
+
         # Setup tabs
         self.setup_download_tab()
-        self.setup_batch_tab()
-        self.setup_history_tab()
-        
-        # Activity log below tabs (also inside scrollable frame)
+        self.setup_in_progress_tab()
+        self.setup_downloaded_tab()
+
+        # Activity log below tabs
         self.create_shared_log(scrollable_frame)
+
+        # Start UI update loop for progress tracking
+        self.update_download_displays()
 
     def create_shared_log(self, parent):
         """Create shared activity log visible on ALL tabs - SCROLLABLE VERSION"""
@@ -1763,58 +2431,16 @@ class UltimateDownloaderModern(ctk.CTk):
         )
         browse_btn.pack(side="right")
         
-        # Progress Section
-        progress_section = ctk.CTkFrame(card, fg_color=Theme.BG_INPUT, corner_radius=Theme.RADIUS_MEDIUM)
-        progress_section.pack(fill="x", padx=30, pady=20)
-        
-        # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(
-            progress_section,
-            height=20,
-            progress_color=Theme.ACCENT_PRIMARY,
-            fg_color=Theme.BG_SECONDARY,
-            corner_radius=10
-        )
-        self.progress_bar.pack(fill="x", padx=20, pady=(20, 10))
-        self.progress_bar.set(0)
-        
-        # Status text
-        self.status_label = ctk.CTkLabel(
-            progress_section,
-            text="Ready to download",
-            font=Theme.FONT_BODY,
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.status_label.pack(pady=(0, 10))
-        
-        # Speed and ETA
-        stats_frame = ctk.CTkFrame(progress_section, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=20, pady=(0, 20))
-        
-        self.speed_label = ctk.CTkLabel(
-            stats_frame,
-            text="Speed: 0 MB/s",
-            font=Theme.FONT_SMALL,
-            text_color=Theme.TEXT_MUTED
-        )
-        self.speed_label.pack(side="left", padx=10)
-        
-        self.eta_label = ctk.CTkLabel(
-            stats_frame,
-            text="ETA: --:--",
-            font=Theme.FONT_SMALL,
-            text_color=Theme.TEXT_MUTED
-        )
-        self.eta_label.pack(side="right", padx=10)
-        
+        # NO PROGRESS BAR SECTION HERE - Moved to "In Progress" tab
+
         # Action Buttons
         button_section = ctk.CTkFrame(card, fg_color="transparent")
-        button_section.pack(fill="x", padx=30, pady=(0, 30))
-        
+        button_section.pack(fill="x", padx=30, pady=(20, 30))
+
         # Download button (main CTA)
         self.download_btn = ctk.CTkButton(
             button_section,
-            text="⬇️ Download Video",
+            text="⬇️ Start Download",
             height=55,
             fg_color=Theme.ACCENT_PRIMARY,
             hover_color=Theme.HOVER,
@@ -1825,25 +2451,11 @@ class UltimateDownloaderModern(ctk.CTk):
             command=self.start_download
         )
         self.download_btn.pack(fill="x", pady=5)
-        
+
         # Secondary buttons row
         secondary_buttons = ctk.CTkFrame(button_section, fg_color="transparent")
         secondary_buttons.pack(fill="x", pady=5)
-        
-        self.cancel_btn = ctk.CTkButton(
-            secondary_buttons,
-            text="⏹️ Cancel",
-            height=45,
-            fg_color=Theme.ERROR,
-            hover_color="#dc2626",
-            border_width=0,
-            corner_radius=Theme.RADIUS_SMALL,
-            font=Theme.FONT_BODY,
-            state="disabled",
-            command=self.cancel_download
-        )
-        self.cancel_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
+
         analyze_btn = ctk.CTkButton(
             secondary_buttons,
             text="🔍 Analyze",
@@ -1855,8 +2467,8 @@ class UltimateDownloaderModern(ctk.CTk):
             font=Theme.FONT_BODY,
             command=self.analyze_url
         )
-        analyze_btn.pack(side="left", fill="x", expand=True, padx=5)
-        
+        analyze_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
         capture_btn = ctk.CTkButton(
             secondary_buttons,
             text="🌐 Browser Capture",
@@ -1870,6 +2482,323 @@ class UltimateDownloaderModern(ctk.CTk):
         )
         capture_btn.pack(side="left", fill="x", expand=True, padx=(5, 0))
     
+    def setup_in_progress_tab(self):
+        """Create the In Progress tab showing all active downloads"""
+        # Main container
+        self.in_progress_container = ctk.CTkScrollableFrame(
+            self.tab_in_progress,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
+        self.in_progress_container.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Header
+        header = ctk.CTkFrame(self.in_progress_container, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(20, 10))
+
+        ctk.CTkLabel(
+            header,
+            text="⏳ Active Downloads",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(side="left")
+
+        self.active_count_label = ctk.CTkLabel(
+            header,
+            text="0 downloads",
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_SECONDARY
+        )
+        self.active_count_label.pack(side="right")
+
+        # Downloads list frame (will be populated dynamically)
+        self.in_progress_list = ctk.CTkFrame(
+            self.in_progress_container,
+            fg_color="transparent"
+        )
+        self.in_progress_list.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Empty state message
+        self.empty_progress_label = ctk.CTkLabel(
+            self.in_progress_list,
+            text="No active downloads\n\nStart a download to see it here",
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_MUTED
+        )
+        self.empty_progress_label.pack(expand=True, pady=50)
+
+    def setup_downloaded_tab(self):
+        """Create the Downloaded tab showing completed downloads"""
+        # Main container
+        self.downloaded_container = ctk.CTkScrollableFrame(
+            self.tab_downloaded,
+            fg_color=Theme.BG_TERTIARY,
+            corner_radius=Theme.RADIUS_MEDIUM
+        )
+        self.downloaded_container.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Header with clear button
+        header = ctk.CTkFrame(self.downloaded_container, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(20, 10))
+
+        ctk.CTkLabel(
+            header,
+            text="✅ Downloaded Files",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        ).pack(side="left")
+
+        clear_completed_btn = ctk.CTkButton(
+            header,
+            text="🗑️ Clear List",
+            width=100,
+            height=30,
+            fg_color=Theme.ERROR,
+            hover_color="#dc2626",
+            corner_radius=8,
+            font=Theme.FONT_SMALL,
+            command=self.clear_completed_downloads
+        )
+        clear_completed_btn.pack(side="right")
+
+        # Downloads list frame
+        self.downloaded_list = ctk.CTkFrame(
+            self.downloaded_container,
+            fg_color="transparent"
+        )
+        self.downloaded_list.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # Empty state
+        self.empty_downloaded_label = ctk.CTkLabel(
+            self.downloaded_list,
+            text="No completed downloads yet\n\nCompleted downloads will appear here",
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_MUTED
+        )
+        self.empty_downloaded_label.pack(expand=True, pady=50)
+
+    def create_download_card(self, parent, download_item, is_active=True):
+        """Create a card showing download progress or completed status"""
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=Theme.BG_INPUT,
+            corner_radius=Theme.RADIUS_SMALL,
+            border_width=2,
+            border_color=Theme.BORDER
+        )
+        card.pack(fill="x", pady=8)
+
+        # Store reference for updates
+        card.download_id = download_item.id
+
+        # Content frame
+        content = ctk.CTkFrame(card, fg_color="transparent")
+        content.pack(fill="x", padx=15, pady=15)
+
+        # Top row: Icon + Title + Status
+        top_row = ctk.CTkFrame(content, fg_color="transparent")
+        top_row.pack(fill="x", pady=(0, 10))
+
+        # Icon
+        icon_text = "⏳" if is_active else ("✅" if download_item.status == "completed" else "❌")
+        icon_label = ctk.CTkLabel(
+            top_row,
+            text=icon_text,
+            font=("Segoe UI", 24),
+            width=40
+        )
+        icon_label.pack(side="left", padx=(0, 10))
+
+        # Title and URL
+        text_frame = ctk.CTkFrame(top_row, fg_color="transparent")
+        text_frame.pack(side="left", fill="x", expand=True)
+
+        title_label = ctk.CTkLabel(
+            text_frame,
+            text=download_item.title[:60] + ("..." if len(download_item.title) > 60 else ""),
+            font=Theme.FONT_BODY,
+            text_color=Theme.TEXT_PRIMARY,
+            anchor="w"
+        )
+        title_label.pack(anchor="w")
+
+        url_label = ctk.CTkLabel(
+            text_frame,
+            text=download_item.url[:50] + "...",
+            font=Theme.FONT_SMALL,
+            text_color=Theme.TEXT_MUTED,
+            anchor="w"
+        )
+        url_label.pack(anchor="w")
+
+        if is_active:
+            # ACTIVE DOWNLOAD CARD
+            # Progress bar
+            progress_bar = ctk.CTkProgressBar(
+                content,
+                height=15,
+                progress_color=Theme.ACCENT_PRIMARY,
+                fg_color=Theme.BG_SECONDARY,
+                corner_radius=8
+            )
+            progress_bar.pack(fill="x", pady=(10, 5))
+            progress_bar.set(download_item.progress / 100)
+            card.progress_bar = progress_bar
+
+            # Stats row
+            stats_row = ctk.CTkFrame(content, fg_color="transparent")
+            stats_row.pack(fill="x")
+
+            # Progress percentage
+            progress_label = ctk.CTkLabel(
+                stats_row,
+                text=f"{download_item.progress:.1f}%",
+                font=Theme.FONT_SMALL,
+                text_color=Theme.ACCENT_PRIMARY
+            )
+            progress_label.pack(side="left")
+            card.progress_label = progress_label
+
+            # Speed
+            speed_mb = download_item.speed / (1024 * 1024) if download_item.speed else 0
+            speed_label = ctk.CTkLabel(
+                stats_row,
+                text=f"⚡ {speed_mb:.2f} MB/s",
+                font=Theme.FONT_SMALL,
+                text_color=Theme.TEXT_SECONDARY
+            )
+            speed_label.pack(side="left", padx=15)
+            card.speed_label = speed_label
+
+            # ETA
+            if download_item.eta:
+                minutes, seconds = divmod(int(download_item.eta), 60)
+                eta_text = f"⏱️ {minutes:02d}:{seconds:02d}"
+            else:
+                eta_text = "⏱️ --:--"
+            eta_label = ctk.CTkLabel(
+                stats_row,
+                text=eta_text,
+                font=Theme.FONT_SMALL,
+                text_color=Theme.TEXT_SECONDARY
+            )
+            eta_label.pack(side="left")
+            card.eta_label = eta_label
+
+            # Cancel button
+            cancel_btn = ctk.CTkButton(
+                stats_row,
+                text="❌ Cancel",
+                width=80,
+                height=25,
+                fg_color=Theme.ERROR,
+                hover_color="#dc2626",
+                corner_radius=6,
+                font=Theme.FONT_SMALL,
+                command=lambda: self.cancel_specific_download(download_item.id)
+            )
+            cancel_btn.pack(side="right")
+
+        else:
+            # COMPLETED DOWNLOAD CARD
+            # File info row
+            info_row = ctk.CTkFrame(content, fg_color="transparent")
+            info_row.pack(fill="x", pady=(10, 5))
+
+            # File size
+            if download_item.total_bytes:
+                size_mb = download_item.total_bytes / (1024 * 1024)
+                size_text = f"💾 {size_mb:.1f} MB"
+            else:
+                size_text = "💾 Unknown size"
+
+            size_label = ctk.CTkLabel(
+                info_row,
+                text=size_text,
+                font=Theme.FONT_SMALL,
+                text_color=Theme.TEXT_SECONDARY
+            )
+            size_label.pack(side="left")
+
+            # Quality
+            quality_label = ctk.CTkLabel(
+                info_row,
+                text=f"🎯 {download_item.quality}",
+                font=Theme.FONT_SMALL,
+                text_color=Theme.TEXT_SECONDARY
+            )
+            quality_label.pack(side="left", padx=15)
+
+            # Status indicator
+            if download_item.status == "completed":
+                status_color = Theme.SUCCESS
+                status_icon = "✅"
+                status_text = "Completed"
+            elif download_item.status == "failed":
+                status_color = Theme.ERROR
+                status_icon = "❌"
+                status_text = f"Failed: {download_item.error_message[:30]}"
+            else:
+                status_color = Theme.WARNING
+                status_icon = "⏹️"
+                status_text = "Cancelled"
+
+            status_label = ctk.CTkLabel(
+                info_row,
+                text=f"{status_icon} {status_text}",
+                font=Theme.FONT_SMALL,
+                text_color=status_color
+            )
+            status_label.pack(side="right")
+
+            # Action buttons
+            buttons_row = ctk.CTkFrame(content, fg_color="transparent")
+            buttons_row.pack(fill="x", pady=(10, 0))
+
+            # Open file button
+            open_btn = ctk.CTkButton(
+                buttons_row,
+                text="📂 Open File",
+                width=100,
+                height=30,
+                fg_color=Theme.SUCCESS,
+                hover_color="#059669",
+                corner_radius=6,
+                font=Theme.FONT_SMALL,
+                command=lambda: self.open_downloaded_file(download_item)
+            )
+            open_btn.pack(side="left", padx=(0, 5))
+
+            # Open folder button
+            folder_btn = ctk.CTkButton(
+                buttons_row,
+                text="📁 Open Folder",
+                width=100,
+                height=30,
+                fg_color=Theme.INFO,
+                hover_color="#2563eb",
+                corner_radius=6,
+                font=Theme.FONT_SMALL,
+                command=lambda: self.open_file_location(download_item)
+            )
+            folder_btn.pack(side="left", padx=5)
+
+            # Remove from list button
+            remove_btn = ctk.CTkButton(
+                buttons_row,
+                text="🗑️ Remove",
+                width=80,
+                height=30,
+                fg_color=Theme.ERROR,
+                hover_color="#dc2626",
+                corner_radius=6,
+                font=Theme.FONT_SMALL,
+                command=lambda: self.remove_from_completed(download_item.id)
+            )
+            remove_btn.pack(side="right")
+
+        return card
+
     def setup_batch_tab(self):
         """Create batch download interface"""
         
@@ -1901,6 +2830,49 @@ class UltimateDownloaderModern(ctk.CTk):
             text_color=Theme.TEXT_PRIMARY
         )
         self.batch_textbox.pack(fill="both", expand=True, padx=30, pady=20)
+
+        # Quality selection
+        quality_section = ctk.CTkFrame(card, fg_color="transparent")
+        quality_section.pack(fill="x", padx=30, pady=20)
+
+        quality_label = ctk.CTkLabel(
+            quality_section,
+            text="Quality",
+            font=Theme.FONT_SUBTITLE,
+            text_color=Theme.TEXT_PRIMARY
+        )
+        quality_label.pack(anchor="w", pady=(0, 10))
+
+        self.batch_quality_buttons_frame = ctk.CTkFrame(
+            quality_section,
+            fg_color="transparent"
+        )
+        self.batch_quality_buttons_frame.pack(fill="x")
+
+        if not hasattr(self, "batch_quality_var"):
+            self.batch_quality_var = tk.StringVar(value="best")
+
+        batch_qualities = [
+            ("Best", "best"),
+            ("1080p", "1080p"),
+            ("720p", "720p"),
+            ("480p", "480p"),
+            ("Audio", "audio")
+        ]
+
+        for label, value in batch_qualities:
+            btn = ctk.CTkRadioButton(
+                self.batch_quality_buttons_frame,
+                text=label,
+                variable=self.batch_quality_var,
+                value=value,
+                font=Theme.FONT_BODY,
+                fg_color=Theme.ACCENT_PRIMARY,
+                hover_color=Theme.HOVER,
+                border_color=Theme.BORDER,
+                text_color=Theme.TEXT_PRIMARY
+            )
+            btn.pack(side="left", padx=10, pady=5)
         
         # Batch controls
         batch_btn = ctk.CTkButton(
@@ -2123,7 +3095,7 @@ class UltimateDownloaderModern(ctk.CTk):
         try:
             stats = self.db.get_statistics()
             
-            # Update stat cards
+            # Update stat cards (with null checks for widgets that may not exist yet)
             total = stats.get('total_downloads', 0)
             size_gb = stats.get('total_size', 0) / (1024**3) if stats.get('total_size') else 0
             
@@ -2135,9 +3107,24 @@ class UltimateDownloaderModern(ctk.CTk):
             except:
                 avg_time = 0
             
-            self.total_downloads_label.configure(text=str(total))
-            self.total_size_label.configure(text=f"{size_gb:.2f} GB")
-            self.avg_time_label.configure(text=f"{avg_time}s")
+            # Safely update labels (may not exist during initialization)
+            if hasattr(self, 'total_downloads_label'):
+                try:
+                    self.total_downloads_label.configure(text=str(total))
+                except:
+                    pass
+            
+            if hasattr(self, 'total_size_label'):
+                try:
+                    self.total_size_label.configure(text=f"{size_gb:.2f} GB")
+                except:
+                    pass
+            
+            if hasattr(self, 'avg_time_label'):
+                try:
+                    self.avg_time_label.configure(text=f"{avg_time}s")
+                except:
+                    pass
             
             # Load history
             self.load_history()
@@ -2148,6 +3135,10 @@ class UltimateDownloaderModern(ctk.CTk):
     def load_history(self):
         """Load download history"""
         try:
+            # Defensive check: history_textbox may not exist during early initialization
+            if not hasattr(self, 'history_textbox'):
+                return
+            
             self.history_textbox.delete("1.0", "end")
             
             downloads = self.db.get_download_history(50)
@@ -2187,81 +3178,523 @@ class UltimateDownloaderModern(ctk.CTk):
             self.log(f"⚠️ Failed to load history: {e}")
     
     def update_progress(self, data):
-        """Update progress bar and stats"""
+        """Thread-safe progress update from DownloadManager callbacks"""
+
+        def _do_update():
+            try:
+                percent = data.get('percent', 0)
+                speed = data.get('speed', 0)
+                eta = data.get('eta', 0)
+
+                # Progress bar
+                self.progress_bar.set(percent / 100)
+
+                # Status
+                if percent >= 100:
+                    self.status_label.configure(
+                        text="Finishing...",
+                        text_color=Theme.SUCCESS,
+                    )
+                else:
+                    self.status_label.configure(
+                        text=f"Downloading... {percent:.1f}%",
+                        text_color=Theme.ACCENT_PRIMARY,
+                    )
+
+                # Speed
+                if speed:
+                    speed_mb = speed / (1024 * 1024)
+                    self.speed_label.configure(text=f"Speed: {speed_mb:.2f} MB/s")
+
+                # ETA
+                if eta:
+                    minutes, seconds = divmod(int(eta), 60)
+                    self.eta_label.configure(text=f"ETA: {minutes:02d}:{seconds:02d}")
+            except Exception as e:
+                print(f"Progress update error: {e}")
+
+        # Always marshal to Tk main thread
+        self.after(0, _do_update)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DOWNLOAD QUEUE HELPER METHODS
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def update_download_displays(self):
+        """FIX #3: Smart UI update - only update values, don't rebuild cards"""
         try:
-            percent = data.get('percent', 0)
-            speed = data.get('speed', 0)
-            eta = data.get('eta', 0)
+            # Check if window still exists
+            if not self.winfo_exists():
+                return
             
-            # Update progress bar
-            self.progress_bar.set(percent / 100)
+            # Initialize card tracking on first run
+            if not hasattr(self, '_card_widgets'):
+                self._card_widgets = {}  # {download_id: card_frame}
             
-            # Update status
-            self.status_label.configure(
-                text=f"Downloading... {percent:.1f}%",
-                text_color=Theme.ACCENT_PRIMARY
-            )
+            # Get active downloads
+            active_downloads = self.downloads_manager.get_all_active()
+            active_ids = {d.id for d in active_downloads}
             
-            # Update speed
-            if speed:
-                speed_mb = speed / (1024 * 1024)
-                self.speed_label.configure(text=f"Speed: {speed_mb:.2f} MB/s")
+            # Remove cards for completed downloads
+            completed_ids = set(self._card_widgets.keys()) - active_ids
+            for download_id in completed_ids:
+                try:
+                    card = self._card_widgets[download_id]
+                    if card.winfo_exists():
+                        card.destroy()
+                except:
+                    pass
+                del self._card_widgets[download_id]
             
-            # Update ETA
-            if eta:
-                minutes, seconds = divmod(int(eta), 60)
-                self.eta_label.configure(text=f"ETA: {minutes:02d}:{seconds:02d}")
-        
+            # Update or create cards for active downloads
+            try:
+                if self.in_progress_list.winfo_exists():
+                    for download in active_downloads:
+                        if download.id in self._card_widgets:
+                            # SMART UPDATE: Update existing card values
+                            card = self._card_widgets[download.id]
+                            if card.winfo_exists():
+                                self.update_download_card(card, download)
+                        else:
+                            # Create new card and track it
+                            card = self.create_download_card(self.in_progress_list, download, is_active=True)
+                            self._card_widgets[download.id] = card
+            except:
+                pass
+            
+            # Update empty/count labels
+            try:
+                if active_downloads:
+                    self.empty_progress_label.pack_forget()
+                    self.active_count_label.configure(text=f"{len(active_downloads)} download(s)")
+                else:
+                    self.empty_progress_label.pack(expand=True, pady=50)
+                    self.active_count_label.configure(text="No active downloads")
+            except:
+                pass
+            
+            # Update completed downloads (only when count changes)
+            completed_downloads = self.downloads_manager.get_all_completed()
+            if hasattr(self, '_last_completed_count'):
+                if len(completed_downloads) != self._last_completed_count:
+                    try:
+                        self.refresh_completed_tab()
+                    except:
+                        pass
+            else:
+                try:
+                    self.refresh_completed_tab()
+                except:
+                    pass
+            self._last_completed_count = len(completed_downloads)
+
         except Exception as e:
-            print(f"Progress update error: {e}")
+            pass  # Silently handle errors
+        finally:
+            # Schedule next update (every 500ms) only if window exists
+            try:
+                if self.winfo_exists():
+                    self.after(500, self.update_download_displays)
+            except:
+                pass
+
+    def update_download_card(self, card, download_item):
+        """Update an existing active-download card from DownloadItem state."""
+        try:
+            # ✅ UPDATE PROGRESS BAR - This is critical!
+            if hasattr(card, "progress_bar"):
+                try:
+                    # Always clamp to 0-1 range for CTkProgressBar
+                    progress_pct = float(download_item.progress or 0)
+                    bar_value = max(0.0, min(1.0, progress_pct / 100.0))
+                    
+                    # Force update
+                    card.progress_bar.set(bar_value)
+                    
+                    # DEBUG every 10%
+                    if int(progress_pct) % 10 == 0 and progress_pct > 0:
+                        print(f"[CARD UPDATE {download_item.id}] Progress: {progress_pct:.1f}% → Bar: {bar_value:.2f}")
+                        
+                except Exception as e:
+                    print(f"[ERROR] progress_bar.set() failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            # percentage label
+            if hasattr(card, "progress_label"):
+                try:
+                    pct = float(download_item.progress or 0)
+                    card.progress_label.configure(text=f"{pct:.1f}%")
+                except Exception:
+                    pass
+
+            # speed label
+            if hasattr(card, "speed_label"):
+                try:
+                    if download_item.speed and download_item.speed > 0:
+                        mbps = download_item.speed / (1024 * 1024)
+                        text = f"⚡ {mbps:.2f} MB/s"
+                    else:
+                        text = "⚡ 0.00 MB/s"
+                    card.speed_label.configure(text=text)
+                except Exception:
+                    pass
+
+            # ETA label
+            if hasattr(card, "eta_label"):
+                try:
+                    if download_item.eta and download_item.eta > 0:
+                        m, s = divmod(int(download_item.eta), 60)
+                        eta_text = f"⏱️ {m:02d}:{s:02d}"
+                    else:
+                        eta_text = "⏱️ --:--"
+                    card.eta_label.configure(text=eta_text)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[ERROR] update_download_card overall: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def refresh_completed_tab(self):
+        """Refresh the Downloaded tab display"""
+        try:
+            # Check if window exists first
+            if not self.winfo_exists():
+                return
+            
+            # Clear existing cards with error handling
+            try:
+                if self.downloaded_list.winfo_exists():
+                    for widget in self.downloaded_list.winfo_children():
+                        try:
+                            widget.destroy()
+                        except:
+                            pass
+            except:
+                return
+
+            # Get completed downloads from manager + database
+            completed_from_manager = self.downloads_manager.get_all_completed()
+
+            # Also load from database (for persistence across app restarts)
+            try:
+                db_history = self.db.get_download_history(20)  # Last 20 downloads
+            except:
+                db_history = []
+
+            # Combine both sources (avoid duplicates by URL)
+            all_completed = {}
+
+            # Add from manager first (most recent session)
+            for download in completed_from_manager:
+                all_completed[download.url] = download
+
+            # Add from database (for historical data)
+            for db_entry in db_history:
+                try:
+                    url = db_entry[1] if isinstance(db_entry, tuple) else db_entry.get('url')
+                    if url not in all_completed:
+                        # Convert DB entry to DownloadItem for consistent display
+                        title = db_entry[2] if isinstance(db_entry, tuple) else db_entry.get('title')
+                        quality = db_entry[4] if isinstance(db_entry, tuple) else db_entry.get('quality')
+                        filepath = db_entry[5] if isinstance(db_entry, tuple) else db_entry.get('file_path')
+                        filesize = db_entry[6] if isinstance(db_entry, tuple) else db_entry.get('file_size')
+
+                        # Create DownloadItem from DB data
+                        item = DownloadItem(0, url, title, quality, os.path.dirname(filepath) if filepath else "")
+                        item.status = "completed"
+                        item.file_path = filepath
+                        item.total_bytes = filesize
+                        all_completed[url] = item
+                except:
+                    pass
+
+            # Display all completed downloads
+            try:
+                if all_completed:
+                    self.empty_downloaded_label.pack_forget()
+                    for download in all_completed.values():
+                        try:
+                            self.create_download_card(self.downloaded_list, download, is_active=False)
+                        except:
+                            pass
+                else:
+                    self.empty_downloaded_label.pack(expand=True, pady=50)
+            except:
+                pass
+
+        except Exception as e:
+            pass  # Silently handle errors
+
+    def cancel_specific_download(self, download_id):
+        """Cancel a specific download - PROPERLY STOPS THE DOWNLOAD"""
+        try:
+            download = self.downloads_manager.get_download(download_id)
+            if download:
+                # ✅ Mark as cancelled in item
+                download.status = "cancelled"
+                
+                # ✅ Signal the download manager to abort
+                # Each download has a download_manager_instance (added during download_worker)
+                if hasattr(download, 'download_manager_instance'):
+                    try:
+                        download.download_manager_instance.cancel()
+                    except Exception as e:
+                        print(f"[cancel manager error] {e}")
+                
+                # ✅ Update manager status
+                self.downloads_manager.update_status(download_id, "cancelled")
+                
+                self.log(f"🛑 Cancelled: {download.title}")
+        except Exception as e:
+            self.log(f"❌ Cancel error: {e}")
+
+    def open_downloaded_file(self, download_item):
+        """Open downloaded file - with file existence check"""
+        try:
+            if not download_item.file_path or not os.path.exists(download_item.file_path):
+                messagebox.showwarning(
+                    "File Not Found",
+                    f"The file no longer exists:\n{download_item.file_path}\n\nIt may have been moved or deleted."
+                )
+                self.log(f"⚠️ File not found: {download_item.file_path}")
+                return
+
+            # Open file with default application
+            if platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', download_item.file_path])
+            elif platform.system() == 'Windows':
+                os.startfile(download_item.file_path)
+            else:  # Linux
+                subprocess.run(['xdg-open', download_item.file_path])
+
+            self.log(f"📂 Opened: {download_item.title}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open file:\n{e}")
+            self.log(f"❌ Open file error: {e}")
+
+    def open_file_location(self, download_item):
+        """Open folder containing the downloaded file"""
+        try:
+            if not download_item.file_path:
+                messagebox.showwarning("Error", "File path not available")
+                return
+
+            folder = os.path.dirname(download_item.file_path)
+
+            if not os.path.exists(folder):
+                messagebox.showwarning(
+                    "Folder Not Found",
+                    f"The folder no longer exists:\n{folder}"
+                )
+                return
+
+            # Open folder
+            if platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', folder])
+            elif platform.system() == 'Windows':
+                subprocess.run(['explorer', folder])
+            else:  # Linux
+                subprocess.run(['xdg-open', folder])
+
+            self.log(f"📁 Opened folder: {folder}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open folder:\n{e}")
+            self.log(f"❌ Open folder error: {e}")
+
+    def remove_from_completed(self, download_id):
+        """Remove download from completed list"""
+        try:
+            self.downloads_manager.remove_download(download_id)
+            self.refresh_completed_tab()
+            self.log("🗑️ Removed from list")
+        except Exception as e:
+            self.log(f"❌ Remove error: {e}")
+
+    def clear_completed_downloads(self):
+        """Clear all completed downloads from the list"""
+        if messagebox.askyesno("Confirm", "Clear all completed downloads from the list?"):
+            try:
+                completed = self.downloads_manager.get_all_completed()
+                for download in completed:
+                    self.downloads_manager.remove_download(download.id)
+                self.refresh_completed_tab()
+                self.log("🗑️ Cleared completed downloads list")
+            except Exception as e:
+                self.log(f"❌ Clear error: {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # DOWNLOAD METHODS
     # ═══════════════════════════════════════════════════════════════════════════
     
     def start_download(self):
-        """Start single download"""
-        if self.is_downloading:
-            messagebox.showwarning("Warning", "Download already in progress!")
-            return
-        
+        """Start download and add to queue - FIXED VERSION"""
         url = self.url_entry.get().strip()
         if not url:
             messagebox.showwarning("Warning", "Please enter a video URL!")
             return
-        
+
         quality = self.quality_var.get()
-        output_path = self.path_entry.get().strip()
-        
-        if not output_path:
-            output_path = str(Path.home() / "Downloads")
-        
-        # Reset UI
-        self.is_downloading = True
-        self.download_btn.configure(state="disabled", fg_color=Theme.TEXT_MUTED)
-        self.cancel_btn.configure(state="normal")
-        self.progress_bar.set(0)
-        self.status_label.configure(
-            text="Starting download...",
-            text_color=Theme.INFO
-        )
-        
-        # Reset download manager
-        self.download_manager.is_cancelled = False
-        
-        # Start download thread
-        threading.Thread(
-            target=self.download_thread,
-            args=(url, quality, output_path),
-            daemon=True
-        ).start()
-        
-        self.log(f"⬇️ Starting download: {url[:60]}...")
+        output_path = self.path_entry.get().strip() or str(Path.home() / "Downloads")
+
+        # Extract unique title first
+        title = getattr(self, '_analyzed_title', None)
+
+        if not title:
+            self.log("🔍 Extracting video title...")
+            try:
+                opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get('title', f'video_{int(time.time())}')
+            except:
+                title = f'video_{int(time.time())}'
+
+        # Add to downloads manager
+        download_id = self.downloads_manager.add_download(url, title, quality, output_path)
+
+        self.log(f"⬇️ Added to queue: {title[:50]}")
+
+        # Switch to "In Progress" tab
+        self.tabview.set("⏳ In Progress")
+
+        # ✅ FIX: Start download in background thread with PROPER callback
+        def download_worker():
+            download_item = None
+            try:
+                download_item = self.downloads_manager.get_download(download_id)
+                if not download_item:
+                    return
+
+                download_item.start_time = time.time()
+                download_item.status = "downloading"
+
+                # ✅ CRITICAL FIX: Define callback FIRST, THEN create manager
+                def progress_callback(d: dict):
+                    """Progress callback - data is already normalized from progress_hook()"""
+                    try:
+                        if d.get("status") not in ("downloading", "finished"):
+                            return
+
+                        # Data is ALREADY normalized by progress_hook()
+                        # Don't recalculate, just pass it through!
+                        percent = d.get("percent", 0.0)
+                        speed = d.get("speed", 0)
+                        eta = d.get("eta", 0)
+                        
+                        # DEBUG: Log when callback is called with progress
+                        if int(percent) % 10 == 0 and percent > 0:
+                            print(f"[PROGRESS_CALLBACK {download_id}] Percent: {percent:.1f}% | Speed: {speed/1024/1024 if speed else 0:.2f}MB/s | ETA: {eta}s")
+                        
+                        # This updates download_item.progress
+                        download_item.update_progress(d)
+                        
+                        if int(percent) % 10 == 0 and percent > 0:
+                            print(f"[AFTER_UPDATE {download_id}] Item progress now: {download_item.progress}%")
+
+                    except Exception as e:
+                        print(f"[progress_callback error] {e}")
+                        import traceback
+                        traceback.print_exc()
+
+                # ✅ NOW create manager with the defined callback
+                download_manager = DownloadManager(
+                    progress_callback=progress_callback,  # ✅ Direct reference, not lambda!
+                    log_callback=self.log,
+                    config=self.config,
+                    logger=self.logger,
+                    security=self.security,
+                    error_handler=self.error_handler
+                )
+
+                # ✅ Store reference so cancel_specific_download can access it
+                download_item.download_manager_instance = download_manager
+
+                # Get capture data
+                referer = getattr(self, "_last_capture_referer", None) if getattr(self, "_url_from_capture", False) else None
+                preferred_title = getattr(self, "_last_capture_title", None) if getattr(self, "_url_from_capture", False) else None
+
+                # Perform download
+                result = download_manager.download(
+                    url,
+                    quality,
+                    output_path,
+                    preferred_title=preferred_title or title,
+                    referer=referer
+                )
+
+                # Update status
+                if result['success']:
+                    download_item.status = "completed"
+                    download_item.file_path = result.get('final_path', '')
+                    download_item.total_bytes = result.get('filesize', 0)
+                    download_item.end_time = time.time()
+                    download_item.progress = 100
+
+                    # Save to database
+                    info = result.get('info', {})
+                    self.db.add_download(
+                        url=url,
+                        title=download_item.title,
+                        site=info.get('extractor', 'Unknown'),
+                        quality=quality,
+                        file_path=download_item.file_path,  # ✅ FIXED parameter name
+                        file_size=download_item.total_bytes,
+                        duration=info.get('duration', 0),
+                        completion_time=result.get('completion_time', 0),
+                        avg_speed=result.get('average_speed', 0)
+                    )
+
+                    self.after(0, lambda: self.log(f"✅ Completed: {download_item.title}"))
+                else:
+                    error = result.get('error', 'Unknown error')
+                    download_item.status = "failed"
+                    download_item.error_message = error
+                    self.after(0, lambda: self.log(f"❌ Failed: {error[:100]}"))
+
+            except Exception as e:
+                if download_item:
+                    download_item.status = "failed"
+                    download_item.error_message = str(e)
+                self.after(0, lambda: self.log(f"❌ Error: {str(e)[:100]}"))
+
+        # Start thread
+        thread = threading.Thread(target=download_worker, daemon=True)
+        thread.start()
+
+        # Store thread reference
+        download_item = self.downloads_manager.get_download(download_id)
+        if download_item:
+            download_item.thread = thread
+
+        # Clear URL field
+        self.url_entry.delete(0, "end")
+        self._analyzed_title = None
     
     def download_thread(self, url, quality, output_path):
         """Background download thread"""
         try:
-            result = self.download_manager.download(url, quality, output_path)
+            referer = None
+            preferred_title = None
+
+            if getattr(self, "_url_from_capture", False):
+                referer = getattr(self, "_last_capture_referer", None)
+                preferred_title = getattr(self, "_last_capture_title", None)
+
+            result = self.download_manager.download(
+                url,
+                quality,
+                output_path,
+                preferred_title=preferred_title,
+                referer=referer,
+            )
+
+            # once used, clear the flag so normal URLs don't reuse this referer
+            self._url_from_capture = False
             
             if result['success']:
                 info = result.get('info', {})
@@ -2283,12 +3716,16 @@ class UltimateDownloaderModern(ctk.CTk):
                     title=title,
                     site=site,
                     quality=quality,
-                    file_path=filepath,
+                    filepath=filepath,          # FIXED
                     file_size=filesize,
                     duration=duration,
                     completion_time=comp_time,
                     avg_speed=0
                 )
+
+
+
+
                 
                 # Update UI
                 self.after(0, lambda: self.download_complete(True, title))
@@ -2299,7 +3736,9 @@ class UltimateDownloaderModern(ctk.CTk):
                 self.after(0, lambda: self.download_complete(False, error))
         
         except Exception as e:
-            self.after(0, lambda: self.download_complete(False, str(e)))
+            error_msg = str(e)              # capture NOW
+            self.after(0, lambda msg=error_msg: self.download_complete(False, msg))
+
     
     def download_complete(self, success, message):
         """Handle download completion"""
@@ -2327,14 +3766,13 @@ class UltimateDownloaderModern(ctk.CTk):
                 messagebox.showerror("Error", f"Download failed:\n{message[:200]}")
     
     def cancel_download(self):
-        """Cancel current download"""
-        if self.is_downloading:
-            self.download_manager.cancel()
-            self.status_label.configure(
-                text="⏹️ Cancelling...",
-                text_color=Theme.WARNING
-            )
-            self.log("⏹️ Cancelling download...")
+        """Cancel current download - cancels all active downloads"""
+        # With the new queue system, we cancel all active downloads
+        active = self.downloads_manager.get_all_active()
+        if active:
+            for download in active:
+                self.cancel_specific_download(download.id)
+            self.log("⏹️ Cancelled all active downloads")
     
     def analyze_url(self):
         """Analyze video and update quality buttons"""
@@ -2441,14 +3879,46 @@ class UltimateDownloaderModern(ctk.CTk):
             return
         
         self.log("🌐 Starting browser capture...")
-        
+
+        # init capture tracking
+        if not hasattr(self, "_captured_urls"):
+            self._captured_urls = set()
+        self._capture_notified = False
+
         def on_video_found(video_url, title, page_url):
-            """Callback when video is captured"""
-            self.after(0, lambda: self.url_entry.delete(0, "end"))
-            self.after(0, lambda: self.url_entry.insert(0, video_url))
-            self.after(0, lambda: self.log(f"🎬 Captured: {video_url[:60]}..."))
-            self.after(0, lambda: messagebox.showinfo("Captured!", f"Video stream captured!\n\n{title}"))
-        
+            """Callback when video is captured - debounced with referer tracking"""
+            def _handle():
+                # init set if needed
+                if not hasattr(self, "_captured_urls"):
+                    self._captured_urls = set()
+
+                # ignore exact duplicates
+                if video_url in self._captured_urls:
+                    # just update field + log, no popup
+                    self.url_entry.delete(0, "end")
+                    self.url_entry.insert(0, video_url)
+                    self.log(f"🎬 Captured (duplicate): {video_url[:60]}...")
+                    return
+
+                # remember this URL, title and its referer (page URL) for Download button
+                self._captured_urls.add(video_url)
+                self._last_capture_referer = page_url
+                self._last_capture_title = title  # NEW: keep human title
+                self._url_from_capture = True
+
+                # update URL box and log
+                self.url_entry.delete(0, "end")
+                self.url_entry.insert(0, video_url)
+                self.log(f"🎬 Captured: {video_url[:60]}...")
+
+                # show popup ONLY on first capture
+                if not getattr(self, "_capture_notified", False):
+                    self._capture_notified = True
+                    messagebox.showinfo("Captured!", f"Video stream captured!\n\n{title}")
+
+
+            self.after(0, _handle)
+
         def capture_thread():
             try:
                 engine = BrowserCaptureEngine(
@@ -2458,13 +3928,14 @@ class UltimateDownloaderModern(ctk.CTk):
                 self.capture_engine = engine
                 engine.start(url, headless=False, timeout_sec=300)
             except Exception as e:
-                self.after(0, lambda: self.log(f"❌ Capture error: {e}"))
-                self.after(0, lambda: messagebox.showerror("Error", f"Browser capture failed:\n{str(e)[:200]}"))
+                error_msg = str(e)
+                self.after(0, lambda: self.log(f"❌ Capture error: {error_msg}"))
+                self.after(0, lambda: messagebox.showerror("Error", f"Browser capture failed:\n{error_msg}"))
         
         threading.Thread(target=capture_thread, daemon=True).start()
     
     def start_batch_download(self):
-        """Start batch download"""
+        """Start batch download - uses queue system like single download"""
         urls_text = self.batch_textbox.get("1.0", "end").strip()
         
         if not urls_text:
@@ -2479,64 +3950,125 @@ class UltimateDownloaderModern(ctk.CTk):
         
         self.log(f"📋 Starting batch download: {len(urls)} videos")
         
-        quality = self.quality_var.get()
+        quality = self.batch_quality_var.get() if hasattr(self, "batch_quality_var") else self.quality_var.get()
         output_path = self.path_entry.get().strip() or str(Path.home() / "Downloads")
         
-        def batch_thread():
-            success_count = 0
-            fail_count = 0
-            
-            for i, url in enumerate(urls, 1):
-                if self.download_manager.is_cancelled:
-                    break
-                
-                self.after(0, lambda i=i, total=len(urls): self.log(f"📥 [{i}/{total}] Downloading..."))
-                
+        # Add all URLs to queue (this will start downloads automatically)
+        for url in urls:
+            try:
+                # Extract title for each URL
+                title = f'batch_video_{int(time.time())}'
                 try:
-                    result = self.download_manager.download(url, quality, output_path)
-                    
-                    if result['success']:
-                        success_count += 1
-                        info = result.get('info', {})
-                        title = info.get('title', 'Video')
-                        filesize = info.get('filesize', 0) or info.get('file_size', 0)
-                        duration = info.get('duration', 0)
-                        comp_time = result.get('completion_time', 0)
-                        
-                        filepath = result.get('filepath', output_path)
-                        if isinstance(info, dict) and 'requested_downloads' in info:
-                            if info['requested_downloads']:
-                                filepath = info['requested_downloads'][0].get('filepath', output_path)
-                        
-                        self.db.add_download(
-                            url=url,
-                            title=title,
-                            site=info.get('extractor', 'Unknown'),
-                            quality=quality,
-                            file_path=filepath,
-                            file_size=filesize,
-                            duration=duration,
-                            completion_time=comp_time,
-                            avg_speed=0
-                        )
-                        self.after(0, lambda: self.log(f"✅ Success!"))
-                    else:
-                        fail_count += 1
-                        self.after(0, lambda e=result.get('error'): self.log(f"❌ Failed: {e}"))
+                    opts = {'quiet': True, 'no_warnings': True, 'extract_flat': True}
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        title = info.get('title', title)
+                except:
+                    pass
                 
-                except Exception as e:
-                    fail_count += 1
-                    self.after(0, lambda e=e: self.log(f"❌ Error: {e}"))
-            
-            # Summary
-            self.after(0, lambda: self.log(f"\n📊 Batch complete: {success_count} success, {fail_count} failed"))
-            self.after(0, lambda: messagebox.showinfo(
-                "Batch Complete",
-                f"Batch download finished!\n\n✅ Success: {success_count}\n❌ Failed: {fail_count}"
-            ))
-            self.after(0, self.load_stats)
+                # Add to downloads manager
+                download_id = self.downloads_manager.add_download(url, title, quality, output_path)
+                
+                # Start download in background
+                def batch_download_worker(url_to_download=url, title_to_use=title, download_id_to_use=download_id):
+                    download_item = None
+                    try:
+                        download_item = self.downloads_manager.get_download(download_id_to_use)
+                        if not download_item:
+                            return
+                        
+                        download_item.start_time = time.time()
+                        download_item.status = "downloading"
+                        
+                        # Define callback first
+                        def batch_progress_callback(data):
+                            """Progress callback for batch downloads"""
+                            try:
+                                downloaded = data.get('downloaded', 0) or data.get('downloaded_bytes', 0) or 0
+                                total = data.get('total', 0) or data.get('total_bytes', 0) or data.get('total_bytes_estimate', 0) or 0
+                                speed = data.get('speed', 0) or data.get('_speed', 0) or 0
+                                eta = data.get('eta', 0) or data.get('_eta', 0) or 0
+                                status = data.get('status', 'downloading')
+                                
+                                if total > 0 and downloaded >= 0:
+                                    percent = min(100.0, (downloaded / total * 100))
+                                else:
+                                    percent = 0.0
+                                
+                                normalized = {
+                                    'status': status,
+                                    'percent': percent,
+                                    'downloaded': downloaded,
+                                    'total': total,
+                                    'speed': speed,
+                                    'eta': eta
+                                }
+                                download_item.update_progress(normalized)
+                            except Exception as e:
+                                print(f"[BATCH PROGRESS ERROR] {e}")
+                        
+                        # Create manager for this download
+                        batch_manager = DownloadManager(
+                            progress_callback=batch_progress_callback,
+                            log_callback=self.log,
+                            config=self.config,
+                            logger=self.logger,
+                            security=self.security,
+                            error_handler=self.error_handler
+                        )
+                        
+                        result = batch_manager.download(
+                            url_to_download,
+                            quality,
+                            output_path,
+                            preferred_title=title_to_use
+                        )
+                        
+                        if result['success']:
+                            download_item.status = "completed"
+                            download_item.file_path = result.get('final_path', '')
+                            download_item.total_bytes = result.get('filesize', 0)
+                            download_item.end_time = time.time()
+                            download_item.progress = 100
+                            
+                            info = result.get('info', {})
+                            self.db.add_download(
+                                url=url_to_download,
+                                title=download_item.title,
+                                site=info.get('extractor', 'Unknown'),
+                                quality=quality,
+                                file_path=download_item.file_path,
+                                file_size=download_item.total_bytes,
+                                duration=info.get('duration', 0),
+                                completion_time=result.get('completion_time', 0),
+                                avg_speed=result.get('average_speed', 0)
+                            )
+                            self.after(0, lambda: self.log(f"✅ Batch item success: {title_to_use[:50]}"))
+                        else:
+                            error = result.get('error', 'Unknown error')
+                            download_item.status = "failed"
+                            download_item.error_message = error
+                            self.after(0, lambda: self.log(f"❌ Batch item failed: {error[:100]}"))
+                    
+                    except Exception as e:
+                        if download_item:
+                            download_item.status = "failed"
+                            download_item.error_message = str(e)
+                        self.after(0, lambda: self.log(f"❌ Batch error: {str(e)[:100]}"))
+                
+                thread = threading.Thread(target=batch_download_worker, daemon=True)
+                thread.start()
+                
+                download_item = self.downloads_manager.get_download(download_id)
+                if download_item:
+                    download_item.thread = thread
+                    
+            except Exception as e:
+                self.log(f"❌ Error adding to batch: {e}")
         
-        threading.Thread(target=batch_thread, daemon=True).start()
+        # Switch to In Progress tab
+        self.tabview.set("⏳ In Progress")
+        self.log(f"📊 Queued all {len(urls)} downloads")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # MENU METHODS
@@ -2589,9 +4121,12 @@ class UltimateDownloaderModern(ctk.CTk):
 
     def on_closing(self):
         """Handle window close"""
-        if self.is_downloading:
-            if messagebox.askyesno("Confirm Exit", "Download in progress. Are you sure you want to exit?"):
-                self.download_manager.cancel()
+        # Cancel all active downloads gracefully
+        active = self.downloads_manager.get_all_active()
+        if active:
+            if messagebox.askyesno("Confirm Exit", f"{len(active)} download(s) in progress. Cancel and exit?"):
+                for download in active:
+                    self.cancel_specific_download(download.id)
                 if self.capture_engine:
                     try:
                         self.capture_engine.stop()
@@ -2599,1609 +4134,23 @@ class UltimateDownloaderModern(ctk.CTk):
                         pass
                 self.db.close()
                 self.destroy()
+            # else: User cancelled exit
         else:
             if self.capture_engine:
                 try:
                     self.capture_engine.stop()
                 except:
                     pass
-            self.db.close()
+            # ═══════════════════════════════════════════════════════════════════════
+            # ENTERPRISE: GRACEFUL SHUTDOWN
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                self.db.close()
+                if self.logger:
+                    self.logger.info("🛑 Application closed")
+            except:
+                pass
             self.destroy()
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION - WITH STATE SAVING FIX
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class UltimateDownloaderV9(ctk.CTk):
-    """Ultra-Modern Video Downloader - Production Ready"""
-    
-    def __init__(self):
-        super().__init__()
-        
-        # Window configuration
-        self.title("🎬 Ultimate Video Downloader Pro")
-        self.geometry("1400x900")
-        self.minsize(1300, 850)
-        
-        # Configure window
-        self.configure(fg_color=Theme.BG_PRIMARY)
-        
-        # State management
-        self.is_downloading = False
-        self.download_path = str(Path.home() / "Downloads")
-        self._log_buffer = []  # Buffer for early log messages
-        
-        # Initialize database
-        self.db = DatabaseManager()
-        self.capture_engine = None
-        
-        # Setup UI (this creates update_progress method at line 2185)
-        self.setup_ui()
-        
-        # NOW create download manager (after update_progress exists)
-        self.download_manager = DownloadManager(
-            progress_callback=lambda data: self.update_progress(data),
-            log_callback=self.log
-        )
-
-        
-        # Load stats
-        self.load_stats()
-
-
-    def create_interface(self):
-        """Create ultra-modern interface"""
-        
-        # Modern sidebar with gradient effect
-        self.sidebar = ctk.CTkFrame(self, width=280, corner_radius=0, fg_color=Theme.BG_SECONDARY)
-        self.sidebar.pack(side="left", fill="y")
-        self.sidebar.pack_propagate(False)
-        
-        # Logo section with modern styling
-        logo_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        logo_frame.pack(pady=(Theme.PADDING_XLARGE, Theme.PADDING_MEDIUM))
-        
-        ctk.CTkLabel(logo_frame, text="🎥", font=ctk.CTkFont(size=56)).pack()
-        ctk.CTkLabel(logo_frame, text="ULTIMATE", 
-                    font=ctk.CTkFont(size=24, weight="bold"),
-                    text_color=Theme.ACCENT_PRIMARY).pack(pady=(5, 0))
-        ctk.CTkLabel(logo_frame, text="Video Downloader", 
-                    font=ctk.CTkFont(size=12),
-                    text_color=Theme.TEXT_SECONDARY).pack()
-        ctk.CTkLabel(logo_frame, text="Modern Edition", 
-                    font=ctk.CTkFont(size=10),
-                    text_color=Theme.TEXT_MUTED).pack()
-        
-        # Navigation with modern buttons
-        nav_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        nav_frame.pack(fill="both", expand=True, pady=Theme.PADDING_LARGE, padx=Theme.PADDING_MEDIUM)
-        
-        nav_items = [
-            ("📥", "Download", "download", lambda: self.switch_page(self.show_download_page)),
-            ("📋", "Batch", "batch", lambda: self.switch_page(self.show_batch_page)),
-            ("📊", "Statistics", "stats", lambda: self.switch_page(self.show_stats_page)),
-            ("📚", "History", "history", lambda: self.switch_page(self.show_history_page)),
-            ("ℹ️", "About", "about", lambda: self.switch_page(self.show_about_page)),
-        ]
-        
-        self.nav_buttons = {}
-        for icon, text, key, command in nav_items:
-            btn_frame = ctk.CTkFrame(nav_frame, fg_color="transparent", height=50)
-            btn_frame.pack(fill="x", pady=Theme.PADDING_TINY)
-            
-            btn = ctk.CTkButton(
-                btn_frame, 
-                text=f"{icon}  {text}", 
-                command=command, 
-                height=48,
-                font=ctk.CTkFont(size=14, weight="normal"), 
-                anchor="w",
-                fg_color="transparent",
-                hover_color=Theme.BG_TERTIARY,
-                text_color=Theme.TEXT_SECONDARY,
-                corner_radius=Theme.RADIUS_SMALL
-            )
-            btn.pack(fill="x", padx=Theme.PADDING_SMALL)
-            self.nav_buttons[key] = btn
-        
-        # Status section at bottom
-        status_frame = ctk.CTkFrame(self.sidebar, fg_color=Theme.BG_TERTIARY, corner_radius=Theme.RADIUS_SMALL)
-        status_frame.pack(side="bottom", pady=Theme.PADDING_LARGE, padx=Theme.PADDING_MEDIUM, fill="x")
-        
-        db_size = self.db.get_database_size()
-        self.db_label = ctk.CTkLabel(
-            status_frame, 
-            text=f"💾 Database: {db_size:.1f} MB",
-            font=ctk.CTkFont(size=11),
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.db_label.pack(pady=Theme.PADDING_SMALL)
-        
-        # Main content area
-        self.main_content = ctk.CTkFrame(self, corner_radius=0, fg_color=Theme.BG_PRIMARY)
-        self.main_content.pack(side="right", fill="both", expand=True)
-        
-        # Show initial page
-        self.show_download_page()
-    
-    # ✅ NEW METHODS FOR STATE SAVING
-    
-    def switch_page(self, page_func):
-        """Switch page and save current state"""
-        # Save state before switching
-        self.save_download_state()
-        self.save_batch_state()
-        # Switch to new page
-        page_func()
-    
-    def save_download_state(self):
-        """Save download page state"""
-        try:
-            self.saved_url = self.url_entry.get().strip()
-            self.saved_detected_info = self.info_frame.winfo_ismapped()
-        except:
-            pass
-    
-    def save_batch_state(self):
-        """Save batch page state"""
-        try:
-            self.saved_batch_urls = self.batch_text.get("1.0", "end").strip()
-        except:
-            pass
-    
-    # ✅ REST OF THE CODE STAYS THE SAME - Just need to modify show_download_page and show_batch_page slightly
-    
-    def show_download_page(self):
-        """Modern download page with state restoration"""
-        self.clear_content()
-        self.highlight_nav("download")
-        
-        # Scrollable container
-        scroll = ctk.CTkScrollableFrame(self.main_content, fg_color=Theme.BG_PRIMARY)
-        scroll.pack(fill="both", expand=True, padx=Theme.PADDING_LARGE, pady=Theme.PADDING_LARGE)
-        
-        # Modern header with gradient effect
-        header_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_LARGE)
-        header_card.pack(fill="x", pady=(0, Theme.PADDING_LARGE))
-        
-        header_content = ctk.CTkFrame(header_card, fg_color="transparent")
-        header_content.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=Theme.PADDING_XLARGE)
-        
-        ctk.CTkLabel(
-            header_content, 
-            text="📥 Single Video Download", 
-            font=ctk.CTkFont(size=34, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(anchor="w")
-        
-        ctk.CTkLabel(
-            header_content, 
-            text="Dynamic quality detection • Auto MP4 format • 1800+ sites supported",
-            font=ctk.CTkFont(size=13),
-            text_color=Theme.TEXT_SECONDARY
-        ).pack(anchor="w", pady=(8, 0))
-        
-        # Quick actions bar
-        quick_actions = ctk.CTkFrame(scroll, fg_color="transparent")
-        quick_actions.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
-        
-        ctk.CTkButton(
-            quick_actions, 
-            text="📋 Paste", 
-            command=self.paste_url, 
-            width=130, 
-            height=40,
-            font=ctk.CTkFont(size=12),
-            fg_color=Theme.BG_TERTIARY,
-            hover_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        ).pack(side="left", padx=(0, Theme.PADDING_SMALL))
-        
-        ctk.CTkButton(
-            quick_actions, 
-            text="📂 Open Folder", 
-            command=self.open_folder, 
-            width=150, 
-            height=40,
-            font=ctk.CTkFont(size=12),
-            fg_color=Theme.BG_TERTIARY,
-            hover_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        ).pack(side="left", padx=(0, Theme.PADDING_SMALL))
-        
-        ctk.CTkButton(
-            quick_actions, 
-            text="➕ Add to Queue", 
-            command=self.add_to_queue, 
-            width=150, 
-            height=40,
-            font=ctk.CTkFont(size=12),
-            fg_color=Theme.ACCENT_SECONDARY,
-            hover_color=Theme.ACCENT_TERTIARY,
-            corner_radius=Theme.RADIUS_SMALL
-        ).pack(side="left")
-        
-        # URL Input Card
-        url_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
-        url_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
-        
-        ctk.CTkLabel(
-            url_card, 
-            text="📎 Video URL", 
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
-        
-        url_input_frame = ctk.CTkFrame(url_card, fg_color="transparent")
-        url_input_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
-        
-        self.url_entry = ctk.CTkEntry(
-            url_input_frame, 
-            placeholder_text="Paste video URL here...", 
-            height=Theme.INPUT_HEIGHT, 
-            font=ctk.CTkFont(size=14),
-            fg_color=Theme.BG_INPUT,
-            border_color=Theme.BORDER,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        )
-        self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
-        self.url_entry.bind("<Return>", lambda e: self.detect_video())
-        
-        # Restore saved URL
-        if self.saved_url:
-            self.url_entry.insert(0, self.saved_url)
-
-        # Capture via Browser button
-        self.capture_btn = ctk.CTkButton(
-            url_input_frame,
-            text="🕵️ Capture",
-            command=self.start_browser_capture,
-            width=160, 
-            height=Theme.INPUT_HEIGHT,
-            font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color=Theme.BG_TERTIARY,
-            hover_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        )
-        self.capture_btn.pack(side="right", padx=(0, Theme.PADDING_SMALL))
-        
-        # Analyze button
-        detect_btn = ctk.CTkButton(
-            url_input_frame, 
-            text="🔍 Analyze", 
-            command=self.detect_video, 
-            width=140, 
-            height=Theme.INPUT_HEIGHT,
-            font=ctk.CTkFont(size=13, weight="bold"), 
-            fg_color=Theme.SUCCESS, 
-            hover_color="#059669",
-            corner_radius=Theme.RADIUS_SMALL
-        )
-        detect_btn.pack(side="right")
-        
-        self.site_label = ctk.CTkLabel(
-            url_card, 
-            text="", 
-            font=ctk.CTkFont(size=12), 
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.site_label.pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
-        
-        # Video Info Card
-        self.info_frame = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
-        
-        info_content = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-        info_content.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=Theme.PADDING_XLARGE)
-        
-        self.title_label = ctk.CTkLabel(
-            info_content, 
-            text="", 
-            font=ctk.CTkFont(size=13, weight="bold"), 
-            anchor="w", 
-            wraplength=1000,
-            text_color=Theme.TEXT_PRIMARY
-        )
-        self.title_label.pack(anchor="w", pady=5)
-        
-        self.duration_label = ctk.CTkLabel(
-            info_content, 
-            text="", 
-            font=ctk.CTkFont(size=12), 
-            anchor="w",
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.duration_label.pack(anchor="w", pady=3)
-        
-        self.size_label = ctk.CTkLabel(
-            info_content, 
-            text="", 
-            font=ctk.CTkFont(size=12), 
-            anchor="w",
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.size_label.pack(anchor="w", pady=3)
-        
-        # Quality Selection Card
-        quality_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
-        quality_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
-        
-        ctk.CTkLabel(
-            quality_card, 
-            text="🎬 Quality Selection", 
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
-        
-        self.quality_var = ctk.StringVar(value='best')
-        self.quality_buttons_frame = ctk.CTkFrame(quality_card, fg_color="transparent")
-        self.quality_buttons_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
-        
-        self.create_default_quality_buttons()
-        
-        # Restore detected info if available
-        if self.saved_url and self.saved_detected_info and self.video_info:
-            self.after(100, lambda: self._update_info_and_qualities(self.video_info))
-        
-        # Save Location Card
-        path_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
-        path_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
-        
-        ctk.CTkLabel(
-            path_card, 
-            text="💾 Save Location", 
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_SMALL))
-        
-        path_inner = ctk.CTkFrame(path_card, fg_color="transparent")
-        path_inner.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
-        
-        self.path_entry = ctk.CTkEntry(
-            path_inner, 
-            height=42, 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.BG_INPUT,
-            border_color=Theme.BORDER,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        )
-        self.path_entry.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
-        self.path_entry.insert(0, self.download_path)
-        
-        ctk.CTkButton(
-            path_inner, 
-            text="📁 Browse", 
-            command=self.browse_folder, 
-            width=130, 
-            height=42,
-            font=ctk.CTkFont(size=12),
-            fg_color=Theme.BG_TERTIARY,
-            hover_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        ).pack(side="right")
-        
-        # Download Button Card
-        btn_card = ctk.CTkFrame(scroll, fg_color="transparent")
-        btn_card.pack(fill="x", pady=(0, Theme.PADDING_MEDIUM))
-        
-        self.download_btn = ctk.CTkButton(
-            btn_card, 
-            text="⬇️ DOWNLOAD NOW", 
-            command=self.start_download,
-            height=65, 
-            font=ctk.CTkFont(size=20, weight="bold"),
-            fg_color=Theme.ACCENT_PRIMARY, 
-            hover_color=Theme.HOVER, 
-            corner_radius=Theme.RADIUS_MEDIUM,
-            text_color=Theme.BG_PRIMARY
-        )
-        self.download_btn.pack(side="left", fill="x", expand=True, padx=(0, Theme.PADDING_SMALL))
-        
-        self.cancel_btn = ctk.CTkButton(
-            btn_card, 
-            text="🛑 Cancel", 
-            command=self.cancel_download,
-            height=65, 
-            width=160, 
-            font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color=Theme.ERROR, 
-            hover_color="#dc2626", 
-            state="disabled",
-            corner_radius=Theme.RADIUS_MEDIUM
-        )
-        self.cancel_btn.pack(side="right")
-        
-        # Progress Card
-        progress_card = ctk.CTkFrame(scroll, fg_color=Theme.BG_SECONDARY, corner_radius=Theme.RADIUS_MEDIUM)
-        progress_card.pack(fill="x")
-        
-        ctk.CTkLabel(
-            progress_card, 
-            text="📊 Download Progress", 
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_XLARGE, Theme.PADDING_MEDIUM))
-        
-        self.progress_bar = ctk.CTkProgressBar(
-            progress_card, 
-            height=32, 
-            corner_radius=Theme.RADIUS_SMALL,
-            fg_color=Theme.BG_INPUT,
-            progress_color=Theme.ACCENT_PRIMARY
-        )
-        self.progress_bar.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
-        self.progress_bar.set(0)
-        
-        # Stats
-        stats_frame = ctk.CTkFrame(progress_card, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
-        
-        self.progress_percent = ctk.CTkLabel(
-            stats_frame, 
-            text="0%", 
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=Theme.ACCENT_PRIMARY
-        )
-        self.progress_percent.pack(side="left", padx=(0, 30))
-        
-        self.speed_label = ctk.CTkLabel(
-            stats_frame, 
-            text="Speed: 0 MB/s", 
-            font=ctk.CTkFont(size=12),
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.speed_label.pack(side="left", padx=(0, 30))
-        
-        self.eta_label = ctk.CTkLabel(
-            stats_frame, 
-            text="ETA: --:--", 
-            font=ctk.CTkFont(size=12),
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.eta_label.pack(side="left", padx=(0, 30))
-        
-        self.size_progress_label = ctk.CTkLabel(
-            stats_frame, 
-            text="0 MB / 0 MB", 
-            font=ctk.CTkFont(size=12),
-            text_color=Theme.TEXT_SECONDARY
-        )
-        self.size_progress_label.pack(side="left")
-        
-        self.status_label = ctk.CTkLabel(
-            progress_card, 
-            text="Ready", 
-            font=ctk.CTkFont(size=13), 
-            text_color=Theme.TEXT_MUTED
-        )
-        self.status_label.pack(anchor="w", padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_MEDIUM))
-        
-        # Console Log
-        log_header = ctk.CTkFrame(progress_card, fg_color="transparent")
-        log_header.pack(fill="x", padx=Theme.PADDING_XLARGE, pady=(Theme.PADDING_SMALL, Theme.PADDING_SMALL))
-        
-        ctk.CTkLabel(
-            log_header, 
-            text="📜 Console Log", 
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color=Theme.TEXT_PRIMARY
-        ).pack(side="left")
-        
-        ctk.CTkButton(
-            log_header, 
-            text="🗑️ Clear", 
-            command=self.clear_log, 
-            width=90, 
-            height=32,
-            font=ctk.CTkFont(size=11),
-            fg_color=Theme.BG_TERTIARY,
-            hover_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        ).pack(side="right")
-        
-        self.log_text = ctk.CTkTextbox(
-            progress_card, 
-            height=140, 
-            font=ctk.CTkFont(size=11, family="Consolas"),
-            fg_color=Theme.BG_INPUT,
-            text_color=Theme.TEXT_PRIMARY,
-            corner_radius=Theme.RADIUS_SMALL
-        )
-        self.log_text.pack(fill="both", expand=True, padx=Theme.PADDING_XLARGE, pady=(0, Theme.PADDING_XLARGE))
-        
-        self.log("✅ System ready • v9.0 Final Edition")
-        self.log(f"📁 Save location: {self.download_path}")
-        if self.saved_url:
-            self.log("✅ Previous URL restored")
-        else:
-            self.log("💡 Paste URL and click Analyze to detect available qualities")
-    
-    def create_default_quality_buttons(self):
-        """Create default quality buttons with modern styling"""
-        for widget in self.quality_buttons_frame.winfo_children():
-            widget.destroy()
-        
-        # Ensure quality_var exists
-        if not hasattr(self, 'quality_var'):
-            self.quality_var = ctk.StringVar(value='best')
-        
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame, 
-            text="🏆 Best", 
-            variable=self.quality_var, 
-            value="best", 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(anchor="w", pady=6)
-        
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame, 
-            text="📺 1080p", 
-            variable=self.quality_var, 
-            value="1080p", 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(anchor="w", pady=6)
-        
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame, 
-            text="🎬 720p", 
-            variable=self.quality_var, 
-            value="720p", 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(anchor="w", pady=6)
-        
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame, 
-            text="📱 480p", 
-            variable=self.quality_var, 
-            value="480p", 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(anchor="w", pady=6)
-        
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame, 
-            text="🎵 Audio", 
-            variable=self.quality_var, 
-            value="audio", 
-            font=ctk.CTkFont(size=13),
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(anchor="w", pady=6)
-        
-        ctk.CTkLabel(
-            self.quality_buttons_frame, 
-            text="▶️ Click 'Analyze' to detect available qualities",
-            font=ctk.CTkFont(size=11), 
-            text_color=Theme.TEXT_MUTED
-        ).pack(anchor="w", pady=(12, 0))
-    
-    def create_dynamic_quality_buttons(self, heights):
-        """Rebuild quality buttons with detected video formats"""
-        # Clear old buttons
-        for widget in self.quality_buttons_frame.winfo_children():
-            widget.destroy()
-        
-        # Reset variable
-        self.quality_var = tk.StringVar(value="best")
-        
-        # Best option
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame,
-            text="🏆 Best",
-            variable=self.quality_var,
-            value="best",
-            font=Theme.FONT_BODY,
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(side="left", padx=10, pady=5)
-        
-        # Detected qualities (top 5)
-        for h in heights[:5]:
-            ctk.CTkRadioButton(
-                self.quality_buttons_frame,
-                text=f"📺 {h}p",
-                variable=self.quality_var,
-                value=f"{h}p",
-                font=Theme.FONT_BODY,
-                fg_color=Theme.ACCENT_PRIMARY,
-                text_color=Theme.TEXT_PRIMARY,
-                hover_color=Theme.HOVER
-            ).pack(side="left", padx=10, pady=5)
-        
-        # Audio option
-        ctk.CTkRadioButton(
-            self.quality_buttons_frame,
-            text="🎵 Audio",
-            variable=self.quality_var,
-            value="audio",
-            font=Theme.FONT_BODY,
-            fg_color=Theme.ACCENT_PRIMARY,
-            text_color=Theme.TEXT_PRIMARY,
-            hover_color=Theme.HOVER
-        ).pack(side="left", padx=10, pady=5)
-        
-        self.log(f"✅ Updated quality buttons: {len(heights)} formats detected")
-
-    def show_batch_page(self):
-        """Batch page - WITH STATE RESTORATION"""
-        self.clear_content()
-        self.highlight_nav("batch")
-        
-        scroll = ctk.CTkScrollableFrame(self.main_content)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Header
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        
-        ctk.CTkLabel(header, text="📋 Batch Download", font=ctk.CTkFont(size=32, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(header, text="Download multiple videos • Real-time progress • Database logging",
-                    font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", pady=(5, 0))
-        
-        # URL List
-        list_frame = ctk.CTkFrame(scroll)
-        list_frame.pack(fill="both", expand=True, pady=(0, 15))
-        
-        list_header = ctk.CTkFrame(list_frame, fg_color="transparent")
-        list_header.pack(fill="x", padx=20, pady=(20, 10))
-        
-        ctk.CTkLabel(list_header, text="📝 URL List", font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
-        
-        self.url_count_label = ctk.CTkLabel(list_header, text="0 URLs", font=ctk.CTkFont(size=12), text_color="gray")
-        self.url_count_label.pack(side="right")
-        
-        self.batch_text = ctk.CTkTextbox(list_frame, height=300, font=ctk.CTkFont(size=12))
-        self.batch_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-        self.batch_text.bind("<KeyRelease>", self.update_url_count)
-        
-        # ✅ RESTORE saved batch URLs
-        if self.saved_batch_urls:
-            self.batch_text.insert("1.0", self.saved_batch_urls)
-            self.update_url_count()
-        
-        # Controls
-        controls = ctk.CTkFrame(scroll, fg_color="transparent")
-        controls.pack(fill="x", pady=(0, 15))
-        
-        ctk.CTkButton(controls, text="📂 Load File", command=self.load_batch_file, width=140, height=42).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(controls, text="📋 Paste", command=self.paste_batch_urls, width=120, height=42).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(controls, text="🗑️ Clear", command=lambda: self.batch_text.delete("1.0", "end"), 
-                     width=120, height=42, fg_color="#dc2626", hover_color="#991b1b").pack(side="left")
-        
-        # Quality
-        quality_frame = ctk.CTkFrame(scroll)
-        quality_frame.pack(fill="x", pady=(0, 15))
-        
-        quality_inner = ctk.CTkFrame(quality_frame, fg_color="transparent")
-        quality_inner.pack(fill="x", padx=20, pady=20)
-        
-        ctk.CTkLabel(quality_inner, text="🎬 Quality:", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=(0, 15))
-        
-        self.batch_quality_var = ctk.StringVar(value="best")
-        for quality in ["best", "1080p", "720p", "480p", "audio"]:
-            ctk.CTkRadioButton(quality_inner, text=quality, variable=self.batch_quality_var, value=quality).pack(side="left", padx=8)
-        
-        # Download button
-        btn_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(0, 15))
-        
-        self.batch_download_btn = ctk.CTkButton(btn_frame, text="⬇️ DOWNLOAD ALL", command=self.start_batch_download,
-                                                height=65, font=ctk.CTkFont(size=20, weight="bold"),
-                                                fg_color="#2563eb", hover_color="#1d4ed8", corner_radius=12)
-        self.batch_download_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        self.batch_cancel_btn = ctk.CTkButton(btn_frame, text="🛑 Stop", command=self.cancel_batch,
-                                              height=65, width=150, font=ctk.CTkFont(size=16, weight="bold"),
-                                              fg_color="#dc2626", hover_color="#991b1b", state="disabled")
-        self.batch_cancel_btn.pack(side="right")
-        
-        # Progress section
-        progress_frame = ctk.CTkFrame(scroll)
-        progress_frame.pack(fill="x", pady=(0, 0))
-        
-        ctk.CTkLabel(progress_frame, text="📊 Batch Progress", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=20, pady=(20, 12))
-        
-        self.batch_progress_label = ctk.CTkLabel(progress_frame, text="Ready to download", font=ctk.CTkFont(size=13), text_color="gray")
-        self.batch_progress_label.pack(anchor="w", padx=20, pady=(0, 8))
-        
-        # Current video progress bar
-        current_video_frame = ctk.CTkFrame(progress_frame, fg_color="transparent")
-        current_video_frame.pack(fill="x", padx=20, pady=(0, 12))
-        
-        self.batch_current_label = ctk.CTkLabel(current_video_frame, text="Current video: --", 
-                                                font=ctk.CTkFont(size=12), text_color="gray")
-        self.batch_current_label.pack(anchor="w", pady=(0, 5))
-        
-        self.batch_current_progress = ctk.CTkProgressBar(current_video_frame, height=20, corner_radius=10)
-        self.batch_current_progress.pack(fill="x", pady=(0, 5))
-        self.batch_current_progress.set(0)
-        
-        self.batch_current_percent = ctk.CTkLabel(current_video_frame, text="0%", font=ctk.CTkFont(size=11))
-        self.batch_current_percent.pack(anchor="w")
-        
-        # Overall batch progress bar
-        overall_frame = ctk.CTkFrame(progress_frame, fg_color="transparent")
-        overall_frame.pack(fill="x", padx=20, pady=(0, 12))
-        
-        ctk.CTkLabel(overall_frame, text="Overall Progress:", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", pady=(0, 5))
-        
-        self.batch_overall_progress = ctk.CTkProgressBar(overall_frame, height=25, corner_radius=12)
-        self.batch_overall_progress.pack(fill="x", pady=(0, 5))
-        self.batch_overall_progress.set(0)
-        
-        self.batch_overall_label = ctk.CTkLabel(overall_frame, text="0 / 0 videos", font=ctk.CTkFont(size=12))
-        self.batch_overall_label.pack(anchor="w")
-        
-        # Console log
-        log_header = ctk.CTkFrame(progress_frame, fg_color="transparent")
-        log_header.pack(fill="x", padx=20, pady=(10, 8))
-        
-        ctk.CTkLabel(log_header, text="📜 Console Log", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
-        ctk.CTkButton(log_header, text="🗑️ Clear", command=self.clear_batch_log, width=80, height=28).pack(side="right")
-        
-        self.batch_log_text = ctk.CTkTextbox(progress_frame, height=200, font=ctk.CTkFont(size=11, family="Consolas"))
-        self.batch_log_text.pack(fill="both", expand=True, padx=20, pady=(0, 20))
-        
-        if self.saved_batch_urls:
-            self.batch_log_message("✅ Previous URLs restored")
-    
-    # ✅ ALL OTHER METHODS STAY EXACTLY THE SAME - no changes needed
-    # (Including show_stats_page, show_history_page, show_about_page, all utility methods, etc.)
-    # I'm including the rest for completeness:
-    
-    def show_stats_page(self):
-        """Statistics page - FIXED display"""
-        self.clear_content()
-        self.highlight_nav("stats")
-        
-        scroll = ctk.CTkScrollableFrame(self.main_content)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Header
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 25))
-        
-        ctk.CTkLabel(header, text="📊 Download Statistics", font=ctk.CTkFont(size=32, weight="bold")).pack(anchor="w")
-        ctk.CTkLabel(header, text="Smart display: seconds → minutes → hours | bytes → KB → MB → GB",
-                    font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", pady=(5, 0))
-        
-        # Get stats
-        stats = self.db.get_statistics()
-        
-        # Debug output
-        print(f"\n[STATS DEBUG]")
-        print(f"Total downloads: {stats['total_downloads']}")
-        print(f"Total size (bytes): {stats['total_size']}")
-        print(f"Total duration (seconds): {stats['total_duration']}")
-        print(f"Average speed (bytes/s): {stats['average_speed']}\n")
-        
-        # Cards
-        cards = ctk.CTkFrame(scroll, fg_color="transparent")
-        cards.pack(fill="x", pady=(0, 25))
-        
-        # Card 1: Total Downloads
-        card1 = ctk.CTkFrame(cards)
-        card1.pack(side="left", fill="both", expand=True, padx=(0, 10))
-        
-        ctk.CTkLabel(card1, text="📥", font=ctk.CTkFont(size=50)).pack(pady=(30, 10))
-        ctk.CTkLabel(card1, text=str(stats['total_downloads']), font=ctk.CTkFont(size=42, weight="bold")).pack(pady=8)
-        ctk.CTkLabel(card1, text="Total Downloads", font=ctk.CTkFont(size=14), text_color="gray").pack(pady=(0, 10))
-        ctk.CTkLabel(card1, text=f"📅 Today: {stats['today_downloads']}", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(0, 20))
-        
-        # Card 2: Total Size - FIXED with smart display
-        card2 = ctk.CTkFrame(cards)
-        card2.pack(side="left", fill="both", expand=True, padx=(0, 10))
-        
-        total_bytes = stats['total_size']
-        
-        # Smart size display
-        if total_bytes >= 1024**3:  # >= 1 GB
-            size_display = f"{total_bytes / (1024**3):.2f} GB"
-            size_font = 36
-        elif total_bytes >= 1024**2:  # >= 1 MB
-            size_display = f"{total_bytes / (1024**2):.0f} MB"
-            size_font = 38
-        elif total_bytes >= 1024:  # >= 1 KB
-            size_display = f"{total_bytes / 1024:.0f} KB"
-            size_font = 40
-        else:
-            size_display = f"{total_bytes} B" if total_bytes > 0 else "0 B"
-            size_font = 42
-        
-        ctk.CTkLabel(card2, text="💾", font=ctk.CTkFont(size=50)).pack(pady=(30, 10))
-        ctk.CTkLabel(card2, text=size_display, font=ctk.CTkFont(size=size_font, weight="bold")).pack(pady=8)
-        ctk.CTkLabel(card2, text="Total Size", font=ctk.CTkFont(size=14), text_color="gray").pack(pady=(0, 10))
-        
-        # Today's size
-        today_bytes = stats['today_size']
-        if today_bytes >= 1024**3:
-            today_display = f"{today_bytes / (1024**3):.2f} GB"
-        elif today_bytes >= 1024**2:
-            today_display = f"{today_bytes / (1024**2):.0f} MB"
-        elif today_bytes >= 1024:
-            today_display = f"{today_bytes / 1024:.0f} KB"
-        else:
-            today_display = f"{today_bytes} B" if today_bytes > 0 else "0 B"
-        
-        ctk.CTkLabel(card2, text=f"📅 Today: {today_display}", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(0, 20))
-        
-        # Card 3: Duration - FIXED with smart display (seconds → minutes → hours)
-        card3 = ctk.CTkFrame(cards)
-        card3.pack(side="left", fill="both", expand=True)
-        
-        total_seconds = stats['total_duration']
-        
-        # Smart duration display
-        if total_seconds >= 3600:  # >= 1 hour
-            hours = total_seconds / 3600
-            duration_display = f"{hours:.1f}h"
-            duration_font = 42
-        elif total_seconds >= 60:  # >= 1 minute
-            minutes = total_seconds / 60
-            duration_display = f"{minutes:.0f}m"
-            duration_font = 44
-        else:  # Seconds
-            duration_display = f"{int(total_seconds)}s" if total_seconds > 0 else "0s"
-            duration_font = 46
-        
-        ctk.CTkLabel(card3, text="⏱️", font=ctk.CTkFont(size=50)).pack(pady=(30, 10))
-        ctk.CTkLabel(card3, text=duration_display, font=ctk.CTkFont(size=duration_font, weight="bold")).pack(pady=8)
-        ctk.CTkLabel(card3, text="Total Duration", font=ctk.CTkFont(size=14), text_color="gray").pack(pady=(0, 10))
-        
-        # Average speed
-        avg_speed_bytes = stats['average_speed']
-        if avg_speed_bytes > 0:
-            avg_speed_mb = avg_speed_bytes / (1024**2)
-            speed_text = f"⚡ Avg Speed: {avg_speed_mb:.1f} MB/s"
-        else:
-            speed_text = "⚡ Avg Speed: N/A"
-        
-        ctk.CTkLabel(card3, text=speed_text, font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(0, 20))
-        
-        # Site Breakdown
-        if stats['sites']:
-            sites_frame = ctk.CTkFrame(scroll)
-            sites_frame.pack(fill="x")
-            
-            ctk.CTkLabel(sites_frame, text="🌐 Top Sites", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=20, pady=(20, 15))
-            
-            sites_grid = ctk.CTkFrame(sites_frame, fg_color="transparent")
-            sites_grid.pack(fill="x", padx=20, pady=(0, 20))
-            
-            for site, count in stats['sites'][:5]:
-                site_row = ctk.CTkFrame(sites_grid, fg_color="transparent")
-                site_row.pack(fill="x", pady=5)
-                
-                ctk.CTkLabel(site_row, text=f"🌐 {site or 'Unknown'}", font=ctk.CTkFont(size=12)).pack(side="left")
-                ctk.CTkLabel(site_row, text=str(count), font=ctk.CTkFont(size=12, weight="bold"), text_color="gray").pack(side="right")
-      
-    def show_history_page(self):
-        """History page"""
-        self.clear_content()
-        self.highlight_nav("history")
-        
-        scroll = ctk.CTkScrollableFrame(self.main_content)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        # Header
-        header = ctk.CTkFrame(scroll, fg_color="transparent")
-        header.pack(fill="x", pady=(0, 20))
-        
-        header_left = ctk.CTkFrame(header, fg_color="transparent")
-        header_left.pack(side="left", fill="x", expand=True)
-        
-        ctk.CTkLabel(header_left, text="📚 Download History", font=ctk.CTkFont(size=32, weight="bold")).pack(anchor="w")
-        
-        ctk.CTkButton(header, text="🗑️ Clear History", command=self.clear_history,
-                     width=160, height=42, fg_color="#dc2626", hover_color="#991b1b").pack(side="right")
-        
-        # Search
-        search_frame = ctk.CTkFrame(scroll, fg_color="transparent")
-        search_frame.pack(fill="x", pady=(0, 15))
-        
-        self.history_search_entry = ctk.CTkEntry(search_frame, placeholder_text="🔍 Search...",
-                                                 height=42, font=ctk.CTkFont(size=13))
-        self.history_search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.history_search_entry.bind("<KeyRelease>", self.search_history)
-        
-        ctk.CTkButton(search_frame, text="🔍 Search", command=self.search_history, width=120, height=42).pack(side="right")
-        
-        # History list
-        self.history_list_frame = ctk.CTkScrollableFrame(scroll, height=600)
-        self.history_list_frame.pack(fill="both", expand=True)
-        
-        self.refresh_history()
-    
-    def show_about_page(self):
-        """About page"""
-        self.clear_content()
-        self.highlight_nav("about")
-        
-        scroll = ctk.CTkScrollableFrame(self.main_content)
-        scroll.pack(fill="both", expand=True, padx=20, pady=20)
-        
-        center = ctk.CTkFrame(scroll, fg_color="transparent")
-        center.pack(expand=True, pady=50)
-        
-        ctk.CTkLabel(center, text="🎥", font=ctk.CTkFont(size=80)).pack(pady=(0, 15))
-        ctk.CTkLabel(center, text="Ultimate Video Downloader", font=ctk.CTkFont(size=32, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(center, text="Version 9.0 Final Edition", font=ctk.CTkFont(size=16), text_color="gray").pack(pady=5)
-        
-        features = [
-            "✅ Dynamic quality detection (444p, 640p, etc.)",
-            "✅ Auto MP4 format",
-            "✅ Fixed statistics display",
-            "✅ Enhanced batch download with progress bars",
-            "✅ Real-time console logging",
-            "✅ Database integration",
-            "✅ State saving when switching pages",
-            "✅ 1800+ websites supported"
-        ]
-        
-        features_frame = ctk.CTkFrame(center)
-        features_frame.pack(pady=20)
-        
-        for feature in features:
-            ctk.CTkLabel(features_frame, text=feature, font=ctk.CTkFont(size=13), anchor="w").pack(anchor="w", padx=30, pady=4)
-    
-    # Background updater
-    def _pip_upgrade(self, package: str) -> None:
-        try:
-            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", package, "--quiet"]
-            subprocess.run(cmd, capture_output=True, check=False)
-            self.log(f"⬆️ {package} checked/updated")
-        except Exception as e:
-            try:
-                self.log(f"⚠️ {package} update skipped: {e}")
-            except Exception:
-                pass
-    
-    def _install_playwright_browsers(self) -> None:
-        try:
-            import platform
-            is_windows = platform.system().lower().startswith("win")
-            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
-            if not is_windows:
-                cmd.append("--with-deps")
-            subprocess.run(cmd, capture_output=True, check=False)
-            self.log("✅ Playwright Chromium available")
-        except Exception as e:
-            try:
-                self.log(f"⚠️ Playwright browser install skipped: {e}")
-            except Exception:
-                pass
-    
-    def _background_update_deps(self) -> None:
-        """Background updates disabled - updates now run at startup"""
-        pass
-    # Core Functions
-    
-    def clear_content(self):
-        for widget in self.main_content.winfo_children():
-            widget.destroy()
-    
-    def highlight_nav(self, active):
-        """Highlight active navigation button with modern styling"""
-        self.current_page = active
-        for key, btn in self.nav_buttons.items():
-            if key == active:
-                btn.configure(
-                    fg_color=Theme.BG_TERTIARY,
-                    text_color=Theme.ACCENT_PRIMARY,
-                    font=ctk.CTkFont(size=14, weight="bold")
-                )
-            else:
-                btn.configure(
-                    fg_color="transparent",
-                    text_color=Theme.TEXT_SECONDARY,
-                    font=ctk.CTkFont(size=14, weight="normal")
-                )
-    
-    def log(self, msg):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        try:
-            self.log_text.insert("end", f"[{timestamp}] {msg}\n")
-            self.log_text.see("end")
-        except:
-            pass
-    
-    def batch_log_message(self, msg):
-        """Log message to batch console"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        try:
-            self.batch_log_text.insert("end", f"[{timestamp}] {msg}\n")
-            self.batch_log_text.see("end")
-        except:
-            pass
-    
-    def clear_log(self):
-        try:
-            self.log_text.delete("1.0", "end")
-            self.log("📜 Console cleared")
-        except:
-            pass
-    
-    def clear_batch_log(self):
-        """Clear batch log"""
-        try:
-            self.batch_log_text.delete("1.0", "end")
-            self.batch_log_message("📜 Console cleared")
-        except:
-            pass
-    
-    def update_progress(self, data):
-        try:
-            status = data.get('status')
-            
-            if status == 'downloading':
-                percent = data.get('percent', 0)
-                downloaded = data.get('downloaded', 0)
-                total = data.get('total', 0)
-                speed = data.get('speed', 0)
-                eta = data.get('eta', 0)
-                
-                self.progress_bar.set(percent / 100)
-                self.progress_percent.configure(text=f"{percent:.1f}%")
-                
-                if total > 0:
-                    down_mb = downloaded / (1024**2)
-                    total_mb = total / (1024**2)
-                    self.size_progress_label.configure(text=f"{down_mb:.1f} MB / {total_mb:.1f} MB")
-                
-                if speed:
-                    speed_mb = speed / (1024**2)
-                    self.speed_label.configure(text=f"Speed: {speed_mb:.2f} MB/s")
-                
-                if eta:
-                    mins, secs = divmod(int(eta), 60)
-                    self.eta_label.configure(text=f"ETA: {mins:02d}:{secs:02d}")
-                
-                self.status_label.configure(text="Downloading...")
-            
-            elif status == 'processing':
-                self.progress_bar.set(0.98)
-                self.status_label.configure(text="Processing...")
-        except:
-            pass
-    
-    def detect_video(self):
-        """Detect video"""
-        url = self.url_entry.get().strip()
-        if not url:
-            messagebox.showwarning("Warning", "Enter URL!")
-            return
-        
-        self.log("🔍 Analyzing video and detecting qualities...")
-        threading.Thread(target=self._detect_thread, args=(url,), daemon=True).start()
-    
-    def _detect_thread(self, url):
-        """Detection thread"""
-        try:
-            ydl_opts = {'quiet': True, 'skip_download': True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                self.video_info = info
-                self.after(0, lambda: self._update_info_and_qualities(info))
-        except Exception as e:
-            self.after(0, lambda: self.log(f"⚠️ Detection failed: {str(e)[:60]}"))
-            self.after(0, lambda: self.info_frame.pack(fill="x", padx=20, pady=(0, 15)))
-    
-    def _update_info_and_qualities(self, info):
-        """Update info and qualities"""
-        title = info.get('title', 'Unknown')
-        duration = info.get('duration', 0)
-        filesize = info.get('filesize') or info.get('filesize_approx', 0)
-        
-        self.title_label.configure(text=f"📝 {title[:70]}")
-        
-        if duration:
-            mins, secs = divmod(int(duration), 60)
-            self.duration_label.configure(text=f"⏱️ Duration: {mins}m {secs}s")
-        
-        if filesize:
-            self.size_label.configure(text=f"💾 Size: ~{filesize/(1024**2):.1f} MB")
-        
-        # Extract qualities
-        formats = info.get('formats', [])
-        available_heights = set()
-        
-        for fmt in formats:
-            height = fmt.get('height')
-            if height and fmt.get('vcodec') != 'none':
-                available_heights.add(height)
-        
-        sorted_qualities = sorted(available_heights, reverse=True)
-        self.available_qualities = sorted_qualities
-        
-        if sorted_qualities:
-            self.create_dynamic_quality_buttons(sorted_qualities)
-            self.log(f"✅ Found qualities: {', '.join(str(q)+'p' for q in sorted_qualities)}")
-        else:
-            self.log("⚠️ No specific qualities detected, using defaults")
-        
-        self.info_frame.pack(fill="x", padx=20, pady=(0, 15))
-        self.log(f"✅ {title[:50]}")
-    
-    def start_download(self):
-        if self.is_downloading:
-            return
-        
-        url = self.url_entry.get().strip()
-        if not url:
-            messagebox.showwarning("Warning", "Enter URL!")
-            return
-        
-        # ✅ Reset cancel flag for a fresh download
-        try:
-            self.download_manager.is_cancelled = False
-        except Exception:
-            pass
-        
-        self.is_downloading = True
-        self.download_btn.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
-        self.progress_bar.set(0)
-        
-        threading.Thread(target=self._download_thread, daemon=True).start()
-    
-    def _download_thread(self):
-        url = self.url_entry.get().strip()
-        quality = self.quality_var.get()
-        output_path = self.path_entry.get().strip()
-        
-        preferred_title = getattr(self, "_preferred_title", None)
-        preferred_referer = getattr(self, "_preferred_referer", None)
-        result = self.download_manager.download(url, quality, output_path, preferred_title=preferred_title, referer=preferred_referer)
-        
-        if result['success']:
-            info = result['info']
-            final_path = result.get('final_path')
-            # Prefer captured title; else yt-dlp title; else basename
-            raw_title = preferred_title or info.get('title') or self.download_manager._fallback_title_from_url(url)
-            title = self.download_manager._sanitize_title(raw_title)
-            site = self.detect_site(url)
-            file_path = final_path or os.path.join(output_path, f"{title}.mp4")
-            self.db.add_download(
-                url, title, site, quality, file_path,
-                result.get('filesize', 0), result.get('duration', 0),
-                result['completion_time'], result['average_speed']
-            )
-            
-            self.after(0, lambda: self.progress_bar.set(1.0))
-            self.after(0, lambda: self.log("✅ Download complete!"))
-            self.after(0, lambda: messagebox.showinfo("Success", f"Downloaded!\n\n{title}"))
-        else:
-            err = result.get('error', '') or ''
-            if 'cancel' in err.lower():
-                self.after(0, lambda: self.log("🛑 Download cancelled"))
-                self.after(0, lambda: self.status_label.configure(text="Cancelled"))
-            else:
-                self.after(0, lambda: self.log(f"❌ Failed: {err[:60]}"))
-                self.after(0, lambda: messagebox.showerror("Error", f"Failed:\n\n{err[:150]}"))
-        
-        self.after(0, self._download_complete)
-        # Clear preferred title after use
-        self._preferred_title = None
-        self._preferred_referer = None
-    
-    def _download_complete(self):
-        self.is_downloading = False
-        self.download_btn.configure(state="normal")
-        self.cancel_btn.configure(state="disabled")
-    
-    def cancel_download(self):
-        """Cancel the current download"""
-        try:
-            self.download_manager.cancel()
-            self.log("⏹️ Cancelling download...")
-            try:
-                self.status_label.configure(text="Cancelling...")
-            except Exception:
-                pass
-        except Exception as e:
-            try:
-                self.log(f"⚠️ Cancel error: {e}")
-            except Exception:
-                pass
-    
-    def detect_site(self, url):
-        sites = {
-            'youtube.com': 'YouTube', 'instagram.com': 'Instagram',
-            'tiktok.com': 'TikTok', 'twitter.com': 'Twitter',
-            'facebook.com': 'Facebook', 'reddit.com': 'Reddit'
-        }
-        for domain, name in sites.items():
-            if domain in url.lower():
-                return name
-        return "Other"
-    
-    def paste_url(self):
-        try:
-            text = pyperclip.paste()
-            if 'http' in text:
-                self.url_entry.delete(0, tk.END)
-                self.url_entry.insert(0, text)
-                self.log("📋 Pasted")
-        except:
-            pass
-    
-    def open_folder(self):
-        path = self.path_entry.get().strip()
-        try:
-            if platform.system() == 'Windows':
-                os.startfile(path)
-            elif platform.system() == 'Darwin':
-                subprocess.call(['open', path])
-            else:
-                subprocess.call(['xdg-open', path])
-        except:
-            pass
-    
-    def browse_folder(self):
-        folder = filedialog.askdirectory(initialdir=self.download_path)
-        if folder:
-            self.download_path = folder
-            self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, folder)
-    
-    def add_to_queue(self):
-        url = self.url_entry.get().strip()
-        if url:
-            quality = self.quality_var.get()
-            if self.db.add_to_queue(url, quality):
-                self.log("➕ Added to queue")
-                messagebox.showinfo("Success", "Added!")
-    
-    def update_url_count(self, event=None):
-        try:
-            content = self.batch_text.get("1.0", "end").strip()
-            urls = [line for line in content.split('\n') if 'http' in line]
-            self.url_count_label.configure(text=f"{len(urls)} URLs")
-        except:
-            pass
-    
-    def load_batch_file(self):
-        file = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
-        if file:
-            try:
-                with open(file, 'r') as f:
-                    self.batch_text.delete("1.0", "end")
-                    self.batch_text.insert("1.0", f.read())
-                messagebox.showinfo("Success", "Loaded!")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-    
-    def paste_batch_urls(self):
-        try:
-            text = pyperclip.paste()
-            if text:
-                current = self.batch_text.get("1.0", "end").strip()
-                if current:
-                    self.batch_text.insert("end", "\n" + text)
-                else:
-                    self.batch_text.insert("1.0", text)
-        except:
-            pass
-    
-    def start_batch_download(self):
-        urls_text = self.batch_text.get("1.0", "end").strip()
-        if not urls_text:
-            messagebox.showwarning("Warning", "Add URLs!")
-            return
-        
-        urls = [line.strip() for line in urls_text.split('\n') if 'http' in line]
-        if not urls:
-            messagebox.showwarning("Warning", "No valid URLs!")
-            return
-        
-        self.is_batch_downloading = True
-        self.batch_download_btn.configure(state="disabled")
-        self.batch_cancel_btn.configure(state="normal")
-        
-        quality = self.batch_quality_var.get()
-        output_path = self.download_path
-        
-        threading.Thread(target=self._batch_thread, args=(urls, quality, output_path), daemon=True).start()
-    
-    def _batch_thread(self, urls, quality, output):
-        """Batch download thread - SAFE VERSION"""
-        completed = 0
-        failed = 0
-        total = len(urls)
-        
-        self.batch_log_message(f"🚀 Starting batch download of {total} videos")
-        self.batch_log_message(f"🎬 Quality: {quality}")
-        self.batch_log_message(f"📁 Output: {output}")
-        self.batch_log_message("─" * 60)
-        
-        for i, url in enumerate(urls, 1):
-            if not self.is_batch_downloading:
-                self.batch_log_message("🛑 Batch download cancelled by user")
-                break
-            
-            # Update progress safely
-            try:
-                overall_percent = ((i - 1) / total) * 100
-                if hasattr(self, 'batch_overall_progress') and self.batch_overall_progress.winfo_exists():
-                    self.after(0, lambda p=overall_percent: self.batch_overall_progress.set(p / 100))
-                if hasattr(self, 'batch_overall_label') and self.batch_overall_label.winfo_exists():
-                    self.after(0, lambda i=i, t=total, c=completed, f=failed: 
-                              self.batch_overall_label.configure(text=f"{i-1} / {t} videos (✅ {c} • ❌ {f})"))
-                if hasattr(self, 'batch_progress_label') and self.batch_progress_label.winfo_exists():
-                    self.after(0, lambda i=i, t=total, c=completed, f=failed: 
-                              self.batch_progress_label.configure(text=f"Downloading video {i}/{t} • Completed: {c} • Failed: {f}"))
-            except:
-                pass
-            
-            try:
-                if hasattr(self, 'batch_current_progress') and self.batch_current_progress.winfo_exists():
-                    self.after(0, lambda: self.batch_current_progress.set(0))
-                if hasattr(self, 'batch_current_percent') and self.batch_current_percent.winfo_exists():
-                    self.after(0, lambda: self.batch_current_percent.configure(text="0%"))
-            except:
-                pass
-            
-            self.batch_log_message(f"\n[{i}/{total}] Processing: {url[:70]}")
-            
-            try:
-                if hasattr(self, 'batch_current_label') and self.batch_current_label.winfo_exists():
-                    self.after(0, lambda u=url: self.batch_current_label.configure(text=f"Current: {u[:60]}..."))
-            except:
-                pass
-            
-            try:
-                def update_current_progress(percent):
-                    try:
-                        if hasattr(self, 'batch_current_progress') and self.batch_current_progress.winfo_exists():
-                            self.after(0, lambda p=percent: self.batch_current_progress.set(p / 100))
-                        if hasattr(self, 'batch_current_percent') and self.batch_current_percent.winfo_exists():
-                            self.after(0, lambda p=percent: self.batch_current_percent.configure(text=f"{p:.1f}%"))
-                    except:
-                        pass
-                
-                result = self.download_manager.download_for_batch(
-                    url, quality, output, batch_progress_callback=update_current_progress
-                )
-                
-                if result['success']:
-                    info = result['info']
-                    title = result['title']
-                    site = self.detect_site(url)
-                    
-                    file_path = os.path.join(output, f"{title}.mp4")
-                    self.db.add_download(
-                        url, title, site, quality, file_path,
-                        result.get('filesize', 0), 
-                        result.get('duration', 0),
-                        result.get('completion_time', 0), 
-                        result.get('average_speed', 0)
-                    )
-                    
-                    completed += 1
-                    self.batch_log_message(f"  📝 Title: {title[:50]}")
-                    self.batch_log_message(f"  ✅ SUCCESS - Saved to database")
-                    
-                    try:
-                        if hasattr(self, 'batch_current_progress') and self.batch_current_progress.winfo_exists():
-                            self.after(0, lambda: self.batch_current_progress.set(1.0))
-                        if hasattr(self, 'batch_current_percent') and self.batch_current_percent.winfo_exists():
-                            self.after(0, lambda: self.batch_current_percent.configure(text="100%"))
-                    except:
-                        pass
-                else:
-                    failed += 1
-                    error = result.get('error', 'Unknown error')[:60]
-                    self.batch_log_message(f"  ❌ FAILED: {error}")
-                
-            except Exception as e:
-                failed += 1
-                self.batch_log_message(f"  ❌ EXCEPTION: {str(e)[:60]}")
-        
-        # Final summary
-        self.batch_log_message("\n" + "═" * 60)
-        self.batch_log_message(f"✅ BATCH DOWNLOAD COMPLETE!")
-        self.batch_log_message(f"📊 Total: {total} videos")
-        self.batch_log_message(f"✅ Successful: {completed}")
-        self.batch_log_message(f"❌ Failed: {failed}")
-        self.batch_log_message(f"📁 Saved to: {output}")
-        
-        try:
-            if hasattr(self, 'batch_overall_progress') and self.batch_overall_progress.winfo_exists():
-                self.after(0, lambda: self.batch_overall_progress.set(1.0))
-            if hasattr(self, 'batch_overall_label') and self.batch_overall_label.winfo_exists():
-                self.after(0, lambda c=completed, t=total, f=failed: 
-                          self.batch_overall_label.configure(text=f"{t} / {t} videos (✅ {c} • ❌ {f})"))
-            if hasattr(self, 'batch_progress_label') and self.batch_progress_label.winfo_exists():
-                self.after(0, lambda c=completed, f=failed: 
-                          self.batch_progress_label.configure(text=f"✅ Batch complete! {c} successful, {f} failed"))
-            if hasattr(self, 'batch_current_label') and self.batch_current_label.winfo_exists():
-                self.after(0, lambda: self.batch_current_label.configure(text="All videos processed"))
-        except:
-            pass
-        
-        self.after(0, self._batch_complete)
-        self.after(0, lambda c=completed, f=failed: messagebox.showinfo(
-            "Batch Complete", 
-            f"Batch download finished!\n\n✅ Successful: {c}\n❌ Failed: {f}\n\nAll downloads saved to database and statistics."
-        ))
-    
-    def _batch_complete(self):
-        self.is_batch_downloading = False
-        self.batch_download_btn.configure(state="normal")
-        self.batch_cancel_btn.configure(state="disabled")
-    
-    def cancel_batch(self):
-        self.is_batch_downloading = False
-        self.batch_log_message("🛑 Cancelled")
-    
-    def refresh_history(self):
-        for widget in self.history_list_frame.winfo_children():
-            widget.destroy()
-        
-        history = self.db.get_download_history(50)
-        
-        if not history:
-            ctk.CTkLabel(self.history_list_frame, text="No downloads yet!",
-                        font=ctk.CTkFont(size=15), text_color="gray").pack(pady=100)
-            return
-        
-        for item in history:
-            item_frame = ctk.CTkFrame(self.history_list_frame)
-            item_frame.pack(fill="x", pady=5)
-            
-            title = item[2] or "Unknown"
-            date = item[9] if len(item) > 9 else "Unknown"
-            
-            ctk.CTkLabel(item_frame, text=f"📹 {title[:60]}", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=15, pady=(10, 2))
-            ctk.CTkLabel(item_frame, text=f"📅 {date} • 🎬 {item[4]} • 🌐 {item[3]}",
-                        font=ctk.CTkFont(size=10), text_color="gray").pack(anchor="w", padx=15, pady=(0, 10))
-    
-    def search_history(self, event=None):
-        query = self.history_search_entry.get().strip()
-        
-        for widget in self.history_list_frame.winfo_children():
-            widget.destroy()
-        
-        if not query:
-            self.refresh_history()
-            return
-        
-        results = self.db.search_downloads(query)
-        
-        if not results:
-            ctk.CTkLabel(self.history_list_frame, text=f"No results for: {query}",
-                        font=ctk.CTkFont(size=14), text_color="gray").pack(pady=50)
-            return
-        
-        for item in results:
-            item_frame = ctk.CTkFrame(self.history_list_frame)
-            item_frame.pack(fill="x", pady=5)
-            
-            title = item[2] or "Unknown"
-            date = item[9] if len(item) > 9 else "Unknown"
-            
-            ctk.CTkLabel(item_frame, text=f"📹 {title[:60]}", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w", padx=15, pady=(10, 2))
-            ctk.CTkLabel(item_frame, text=f"📅 {date} • 🎬 {item[4]} • 🌐 {item[3]}",
-                        font=ctk.CTkFont(size=10), text_color="gray").pack(anchor="w", padx=15, pady=(0, 10))
-    
-    def clear_history(self):
-        if messagebox.askyesno("Confirm", "Clear all history?"):
-            self.db.clear_history()
-            self.refresh_history()
-            messagebox.showinfo("Success", "Cleared!")
-
-    def start_browser_capture(self):
-        """Start browser capture for the current URL"""
-        url = self.url_entry.get().strip()
-        if not url:
-            messagebox.showwarning("Warning", "Enter URL first!")
-            return
-
-        if getattr(self, "_capture_thread", None) and self._capture_thread.is_alive():
-            self.log("♻️ Restarting capture (previous session detected).")
-            try:
-                self.stop_browser_capture()
-            except Exception:
-                pass
-
-        self.log("🕵️ Starting browser capture...")
-        self.log("⚠️ Do not close the capture browser until the download is finished.")
-
-        def _sanitize_filename(name: str) -> str:
-            try:
-                if not name:
-                    return ""
-                bad = '<>:"/\\|?*'
-                for ch in bad:
-                    name = name.replace(ch, "_")
-                return name.strip()[:200]
-            except Exception:
-                return ""
-
-        def on_found(media_url: str, page_title: str = "", page_url: str = ""):
-            # Insert the direct media URL back into the entry and clipboard
-            try:
-                safe_title = _sanitize_filename(page_title) or None
-                self._preferred_title = safe_title
-                self._preferred_referer = page_url or None
-                self.after(0, lambda: self.url_entry.delete(0, tk.END))
-                self.after(0, lambda: self.url_entry.insert(0, media_url))
-                try:
-                    pyperclip.copy(media_url)
-                    self.after(0, lambda: self.log("📋 Direct media URL copied to clipboard"))
-                except Exception:
-                    pass
-                if safe_title:
-                    self.after(0, lambda: self.log(f"✅ Media URL captured. Will save as: {safe_title}.mp4"))
-                else:
-                    self.after(0, lambda: self.log("✅ Media URL captured. You can now Analyze or Download."))
-            except Exception:
-                pass
-
-        self._browser_engine = BrowserCaptureEngine(self.log, on_found)
-        self._capture_thread = threading.Thread(
-            target=lambda: self._browser_engine.start(url, headless=False, timeout_sec=300),
-            daemon=True
-        )
-        self._capture_thread.start()
-        self._watch_capture()
-
-    def stop_browser_capture(self):
-        """Stop browser capture if running"""
-        try:
-            if getattr(self, "_browser_engine", None):
-                self._browser_engine.stop()
-                self.log("🛑 Stopping capture...")
-            if getattr(self, "_capture_thread", None):
-                try:
-                    self._capture_thread.join(timeout=2)
-                except Exception:
-                    pass
-                self._capture_thread = None
-            self._browser_engine = None
-        except Exception:
-            pass
-    
-    def _watch_capture(self):
-        """Watcher to clear capture state when thread ends"""
-        try:
-            th = getattr(self, "_capture_thread", None)
-            if th and th.is_alive():
-                self.after(500, self._watch_capture)
-            else:
-                self._capture_thread = None
-                self._browser_engine = None
-                self.log("🟢 Capture stopped.")
-        except Exception:
-            pass
-    
-    def on_closing(self):
-        """Clean up and close"""
-        try:
-            self.stop_browser_capture()
-        except Exception:
-            pass
-        self.db.close()
-        self.destroy()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
@@ -4219,16 +4168,8 @@ if __name__ == "__main__":
     except RuntimeError:
         pass  # Already set
     
-    # Choose GUI version:
-    # - UltimateDownloaderV9: Full-featured with sidebar navigation
-    # - UltimateDownloaderModern: Ultra-modern tabbed interface (Complete!)
-    USE_MODERN_GUI = True  # Set to False to use the classic V9 interface
-    
-    if USE_MODERN_GUI:
-        app = UltimateDownloaderModern()
-        app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    else:
-        app = UltimateDownloaderV9()
-        app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    
+    # Launch the application
+    app = UltimateDownloaderModern()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
+
