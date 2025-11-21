@@ -3523,27 +3523,27 @@ class UltimateDownloaderModern(ctk.CTk):
                 completed = self.downloads_manager.get_all_completed()
                 for download in completed:
                     self.downloads_manager.remove_download(download.id)
-    
+
                 # 2) Clear persisted history in the database
                 if hasattr(self, "db"):
                     self.db.clear_history()  # uses DatabaseManager.clear_history()
-    
+
                 # 3) Refresh all UI pieces that read from the DB
                 try:
                     self.refresh_completed_tab()   # Downloaded tab cards
                 except Exception:
                     pass
-    
+
                 try:
                     self.load_history()            # History textbox (if the History tab is used)
                 except Exception:
                     pass
-    
+
                 try:
                     self.load_stats()              # Top statistics cards
                 except Exception:
                     pass
-    
+
                 self.log("Cleared completed downloads and history")
             except Exception as e:
                 self.log(f"Clear error: {e}")
