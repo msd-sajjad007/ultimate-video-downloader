@@ -3516,16 +3516,38 @@ class UltimateDownloaderModern(ctk.CTk):
             self.log(f"❌ Remove error: {e}")
 
     def clear_completed_downloads(self):
-        """Clear all completed downloads from the list"""
-        if messagebox.askyesno("Confirm", "Clear all completed downloads from the list?"):
+        """Clear all completed downloads and history."""
+        if messagebox.askyesno("Confirm", "Clear all completed downloads and history?"):
             try:
+                # 1) Clear in‑memory completed downloads
                 completed = self.downloads_manager.get_all_completed()
                 for download in completed:
                     self.downloads_manager.remove_download(download.id)
-                self.refresh_completed_tab()
-                self.log("🗑️ Cleared completed downloads list")
+    
+                # 2) Clear persisted history in the database
+                if hasattr(self, "db"):
+                    self.db.clear_history()  # uses DatabaseManager.clear_history()
+    
+                # 3) Refresh all UI pieces that read from the DB
+                try:
+                    self.refresh_completed_tab()   # Downloaded tab cards
+                except Exception:
+                    pass
+    
+                try:
+                    self.load_history()            # History textbox (if the History tab is used)
+                except Exception:
+                    pass
+    
+                try:
+                    self.load_stats()              # Top statistics cards
+                except Exception:
+                    pass
+    
+                self.log("Cleared completed downloads and history")
             except Exception as e:
-                self.log(f"❌ Clear error: {e}")
+                self.log(f"Clear error: {e}")
+
 
     # ═══════════════════════════════════════════════════════════════════════════
     # DOWNLOAD METHODS
